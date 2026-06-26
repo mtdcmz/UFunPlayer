@@ -438,7 +438,7 @@ static bool SwitchRuntime(int major, int minor)
     sprintf(monoDst,   "%s\\mono\\3.x.x",   wpBase);
     sprintf(playerDst, "%s\\player\\3.x.x", wpBase);
 
-    // Step 1: delete destination folders entirely (matches VBS)
+    // Step 1: delete destination folders entirely
     DeleteFolderContents(monoDst);   RemoveDirectoryA(monoDst);
     DeleteFolderContents(playerDst); RemoveDirectoryA(playerDst);
 
