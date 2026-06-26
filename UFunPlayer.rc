@@ -1,0 +1,95 @@
+#include "resource.h"
+#include <windows.h>
+
+// Ensure IDC_STATIC is always available
+#ifndef IDC_STATIC
+#define IDC_STATIC (-1)
+#endif
+
+// Icons (provide ufunplayer.ico in the same directory)
+IDI_MAINICON  ICON "ufunplayer.ico"
+IDI_SMALLICON ICON "ufunplayer.ico"
+
+// --- Main Menu ---------------------------------------------------------------
+IDR_MAINMENU MENU
+BEGIN
+    POPUP "&File"
+    BEGIN
+        MENUITEM "&Open...\tCtrl+O",     IDM_FILE_OPEN
+        MENUITEM SEPARATOR
+        MENUITEM "E&xit",                IDM_FILE_EXIT
+    END
+    POPUP "&View"
+    BEGIN
+        MENUITEM "&Fullscreen\tF11",     IDM_VIEW_FULLSCREEN
+    END
+    POPUP "&Control"
+    BEGIN
+        POPUP "&Quality"
+        BEGIN
+            MENUITEM "&Low",    IDM_CTRL_QUALITY_L, GRAYED
+            MENUITEM "&Medium", IDM_CTRL_QUALITY_M, GRAYED
+            MENUITEM "&High",   IDM_CTRL_QUALITY_H, GRAYED
+        END
+    END
+    POPUP "&Help"
+    BEGIN
+        MENUITEM "&GitHub Repository",   IDM_HELP_REPO
+        MENUITEM SEPARATOR
+        MENUITEM "&About UFunPlayer...", IDM_HELP_ABOUT
+    END
+END
+
+// --- Keyboard Accelerators ---------------------------------------------------
+IDR_ACCEL ACCELERATORS
+BEGIN
+    "O",    IDM_FILE_OPEN,       VIRTKEY, CONTROL
+    VK_F11, IDM_VIEW_FULLSCREEN, VIRTKEY
+END
+
+// --- Open Dialog -------------------------------------------------------------
+// NOTE: DIALOG + 2-param FONT (not DIALOGEX) for windres compatibility
+IDD_OPEN DIALOG 0, 0, 330, 112
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Open (UFunPlayer)"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT         "Enter the network location (URL) of a .unity3d file:", IDC_STATIC, 10, 10, 310, 10
+    EDITTEXT      IDC_URLEDIT, 10, 22, 310, 14, ES_AUTOHSCROLL
+    LTEXT         "Example:  http://example.com/game.unity3d",            IDC_STATIC, 10, 40, 310, 10
+    LTEXT         "--- or browse your local files ---",                   IDC_STATIC, 10, 56, 310, 10, SS_CENTER
+    PUSHBUTTON    "&Browse...", IDC_BROWSE,  10, 70,  60, 14
+    DEFPUSHBUTTON "&OK",        IDOK,       210, 90,  50, 14
+    PUSHBUTTON    "Cancel",     IDCANCEL,   268, 90,  50, 14
+END
+
+// --- About Dialog ------------------------------------------------------------
+IDD_ABOUT DIALOG 0, 0, 280, 90
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "About UFunPlayer"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    ICON          IDI_MAINICON, IDC_STATIC, 10, 10, 0, 0
+    LTEXT         "UFunPlayer 1.0",                                        IDC_STATIC,  48,  12, 220, 12
+    LTEXT         "A Standalone Unity Web Player",                         IDC_STATIC,  48,  24, 220, 10
+    LTEXT         "https://github.com/mtdcmz/UFunPlayer",                 IDC_STATIC,  48,  36, 220, 10
+    LTEXT         "",                                                      IDC_STATIC,  10,  56, 260,  1, SS_ETCHEDHORZ
+    DEFPUSHBUTTON "OK", IDOK, 115, 68, 50, 14
+END
+
+// --- Download / Runtime-Not-Found Dialog -------------------------------------
+IDD_DOWNLOAD DIALOG 0, 0, 320, 148
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Runtime Package Not Found"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT         "The Unity Web Player runtime files were not found.",             IDC_STATIC,  10,  10, 300, 10
+    LTEXT         "Expected location:",                                             IDC_STATIC,  10,  24, 300, 10
+    EDITTEXT      IDC_DL_PATH, 10, 36, 300, 14, ES_READONLY | ES_AUTOHSCROLL
+    LTEXT         "Download Runtime.zip from GitHub and extract it so that",        IDC_STATIC,  10,  58, 300, 10
+    LTEXT         "Runtime\\mono\\ and Runtime\\player\\ sit next to UFunPlayer.exe.", IDC_STATIC, 10, 70, 300, 10
+    LTEXT         "URL: https://github.com/mtdcmz/UFunPlayer/releases/latest",     IDC_STATIC,  10,  86, 300, 10
+    PUSHBUTTON    "Open &Download Page", IDC_DL_BROWSER,  10, 110, 110, 14
+    DEFPUSHBUTTON "I'll do it &later",   IDOK,           176, 110,  64, 14
+    PUSHBUTTON    "Cancel",              IDCANCEL,       248, 110,  60, 14
+END
