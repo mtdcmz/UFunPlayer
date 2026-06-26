@@ -310,7 +310,6 @@ static BundleInfo ReadBundleFromURL(const char* url)
 //  Runtime management
 //
 //  Runtime definitions: registry channel value + folder name on disk.
-//  Folder names must match RuntimeMgr.vbs exactly:
 //    channel-string + format-version-string, concatenated without separator.
 //    e.g. "Beta-5.0" + "5.x.x" = "Beta-5.05.x.x"
 // ---------------------------------------------------------------------------
@@ -403,7 +402,6 @@ static void CopyFolderContents(const char* src, const char* dest)
 }
 
 // Switch runtime to the channel matching major.minor.
-// Mirrors RuntimeMgr.vbs exactly:
 //   1. Delete destination folder (3.x.x) entirely
 //   2. Copy from Runtime\mono\<folder> to …\WebPlayer\mono\3.x.x
 //   3. Same for player\
@@ -424,7 +422,6 @@ static bool SwitchRuntime(int major, int minor)
             "Runtime folder not found for channel [%s]:\n\n"
             "  %s\n\n"
             "Please check your Runtime package.\n"
-            "Folder names must follow RuntimeMgr.vbs convention,\n"
             "e.g. Runtime\\mono\\Beta-5.05.x.x\\",
             def.channel, monoSrc);
         MessageBoxA(g_hwndMain, msg, "Runtime Switch Failed", MB_ICONWARNING);
@@ -449,7 +446,7 @@ static bool SwitchRuntime(int major, int minor)
     CopyFolderContents(monoSrc,   monoDst);
     CopyFolderContents(playerSrc, playerDst);
 
-    // Step 3: update registry (mirrors RuntimeMgr.vbs ws.RegWrite)
+    // Step 3: update registry
     HKEY hk = nullptr;
     if (RegCreateKeyExA(HKEY_CURRENT_USER, "Software\\Unity\\WebPlayer",
             0, nullptr, 0, KEY_WRITE, nullptr, &hk, nullptr) == ERROR_SUCCESS) {
