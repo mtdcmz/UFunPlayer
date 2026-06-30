@@ -1,27 +1,29 @@
 #include "resource.h"
 #include <windows.h>
 
-// Ensure IDC_STATIC is always available
 #ifndef IDC_STATIC
 #define IDC_STATIC (-1)
 #endif
 
-// Icons (provide ufunplayer.ico in the same directory)
 IDI_MAINICON  ICON "ufunplayer.ico"
 IDI_SMALLICON ICON "ufunplayer.ico"
 
 // --- Main Menu ---------------------------------------------------------------
+// File menu: only static top items here.
+// Recent files + separator + Exit are inserted dynamically by RebuildFileMenu()
+// via WM_INITMENUPOPUP, so they never appear half-built.
 IDR_MAINMENU MENU
 BEGIN
     POPUP "&File"
     BEGIN
-        MENUITEM "&Open...\tCtrl+O",     IDM_FILE_OPEN
+        MENUITEM "&Open...\tCtrl+O",   IDM_FILE_OPEN
+        MENUITEM "&Reload\tCtrl+R",    IDM_FILE_RELOAD, GRAYED
+        MENUITEM "&Close",             IDM_FILE_CLOSE,  GRAYED
         MENUITEM SEPARATOR
-        MENUITEM "E&xit",                IDM_FILE_EXIT
     END
     POPUP "&View"
     BEGIN
-        MENUITEM "&Fullscreen\tF11",     IDM_VIEW_FULLSCREEN
+        MENUITEM "&Fullscreen\tF11",   IDM_VIEW_FULLSCREEN
     END
     POPUP "&Control"
     BEGIN
@@ -44,11 +46,11 @@ END
 IDR_ACCEL ACCELERATORS
 BEGIN
     "O",    IDM_FILE_OPEN,       VIRTKEY, CONTROL
+    "R",    IDM_FILE_RELOAD,     VIRTKEY, CONTROL
     VK_F11, IDM_VIEW_FULLSCREEN, VIRTKEY
 END
 
 // --- Open Dialog -------------------------------------------------------------
-// NOTE: DIALOG + 2-param FONT (not DIALOGEX) for windres compatibility
 IDD_OPEN DIALOG 0, 0, 330, 112
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Open (UFunPlayer)"
@@ -70,10 +72,10 @@ CAPTION "About UFunPlayer"
 FONT 8, "MS Shell Dlg"
 BEGIN
     ICON          IDI_MAINICON, IDC_STATIC, 10, 10, 0, 0
-    LTEXT         "UFunPlayer 1.0",                                        IDC_STATIC,  48,  12, 220, 12
-    LTEXT         "A Standalone Unity Web Player",                         IDC_STATIC,  48,  24, 220, 10
-    LTEXT         "https://github.com/mtdcmz/UFunPlayer",                 IDC_STATIC,  48,  36, 220, 10
-    LTEXT         "",                                                      IDC_STATIC,  10,  56, 260,  1, SS_ETCHEDHORZ
+    LTEXT         "UFunPlayer 1.1",                        IDC_STATIC, 48, 12, 220, 12
+    LTEXT         "A Standalone Unity Web Player",         IDC_STATIC, 48, 24, 220, 10
+    LTEXT         "https://github.com/mtdcmz/UFunPlayer",  IDC_STATIC, 48, 36, 220, 10
+    LTEXT         "",                                      IDC_STATIC, 10, 56, 260,  1, SS_ETCHEDHORZ
     DEFPUSHBUTTON "OK", IDOK, 115, 68, 50, 14
 END
 
@@ -83,12 +85,12 @@ STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMEN
 CAPTION "Runtime Package Not Found"
 FONT 8, "MS Shell Dlg"
 BEGIN
-    LTEXT         "The Unity Web Player runtime files were not found.",             IDC_STATIC,  10,  10, 300, 10
-    LTEXT         "Expected location:",                                             IDC_STATIC,  10,  24, 300, 10
+    LTEXT         "The Unity Web Player runtime files were not found.",                IDC_STATIC,  10,  10, 300, 10
+    LTEXT         "Expected location:",                                                IDC_STATIC,  10,  24, 300, 10
     EDITTEXT      IDC_DL_PATH, 10, 36, 300, 14, ES_READONLY | ES_AUTOHSCROLL
-    LTEXT         "Download Runtime.zip from GitHub and extract it so that",        IDC_STATIC,  10,  58, 300, 10
-    LTEXT         "Runtime\\mono\\ and Runtime\\player\\ sit next to UFunPlayer.exe.", IDC_STATIC, 10, 70, 300, 10
-    LTEXT         "URL: https://github.com/mtdcmz/UFunPlayer/releases/latest",     IDC_STATIC,  10,  86, 300, 10
+    LTEXT         "Download Runtime.zip from GitHub and extract it so that",           IDC_STATIC,  10,  58, 300, 10
+    LTEXT         "Runtime\\mono\\ and Runtime\\player\\ sit next to UFunPlayer.exe.", IDC_STATIC,  10,  70, 300, 10
+    LTEXT         "URL: https://github.com/mtdcmz/UFunPlayer/releases/latest",        IDC_STATIC,  10,  86, 300, 10
     PUSHBUTTON    "Open &Download Page", IDC_DL_BROWSER,  10, 110, 110, 14
     DEFPUSHBUTTON "I'll do it &later",   IDOK,           176, 110,  64, 14
     PUSHBUTTON    "Cancel",              IDCANCEL,       248, 110,  60, 14

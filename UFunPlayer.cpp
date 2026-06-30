@@ -30,9 +30,13 @@
 //  Constants
 // ---------------------------------------------------------------------------
 #define APP_NAME       "UFunPlayer"
-#define APP_VERSION    "1.0"
+#define APP_VERSION    "1.1"
 #define GITHUB_URL     "https://github.com/mtdcmz/UFunPlayer"
 #define RUNTIME_DL_URL "https://github.com/mtdcmz/UFunPlayer/releases/latest/download/Runtime.zip"
+
+// Recent files MRU
+#define REG_MRU_KEY    "Software\\UFunPlayer\\RecentFiles"
+#define MRU_MAX        10
 
 // Unity Web Player ActiveX CLSID  {444785F1-DE89-4295-863A-D46C3A781394}
 static const CLSID CLSID_UnityWebPlayer = {
@@ -41,8 +45,8 @@ static const CLSID CLSID_UnityWebPlayer = {
 };
 
 // Custom window messages
-#define WM_POSTINIT  (WM_APP + 1)   // deferred init after window is visible
-#define WM_LOADFILE  (WM_APP + 2)   // lParam = heap-allocated char* path (caller frees)
+#define WM_POSTINIT  (WM_APP + 1)
+#define WM_LOADFILE  (WM_APP + 2)
 
 // ---------------------------------------------------------------------------
 //  Global state
@@ -61,16 +65,23 @@ class UnityClientSite;
 static UnityClientSite* g_pSite = nullptr;
 
 // App state
-static bool g_unityReady  = false;   // Unity control is alive
-static bool g_gameLoaded  = false;   // a game is currently running
+static bool g_unityReady  = false;
+static bool g_gameLoaded  = false;
 static bool g_fullscreen  = false;
 static RECT g_savedRect   = {};
+
+// Current loaded game path – raw Windows path or URL, no conversion
+static char g_currentPath[MAX_PATH * 2] = {};
 
 static char g_statusText[160] = "Drag a .unity3d file here, or use File > Open.";
 static char g_exeDir[MAX_PATH] = {};
 
 // Pending file from command line (used in WM_POSTINIT)
 static char g_pendingFile[MAX_PATH * 2] = {};
+
+// MRU list
+static char g_mruList[MRU_MAX][MAX_PATH * 2];
+static int  g_mruCount = 0;
 
 // ---------------------------------------------------------------------------
 //  Forward declarations
@@ -83,20 +94,19 @@ INT_PTR CALLBACK DownloadDlgProc(HWND, UINT, WPARAM, LPARAM);
 static void  UnityDestroy();
 static bool  UnityCreate(HWND hwnd, const char* src);
 static void  UnityResize(int w, int h);
-static void  UnitySetPropW(const wchar_t* name, const wchar_t* value);
-
 static void  LoadFileOrUrl(const char* path);
+static void  ReloadGame();
 static void  CloseGame();
 static void  SetStatus(const char* text);
 static void  ToggleFullscreen();
+static void  RebuildFileMenu();
 
 // ---------------------------------------------------------------------------
 //  OLE container site
 //
 //  We need IOleClientSite + IOleInPlaceSite + IOleInPlaceFrame.
 //  IOleInPlaceFrame is put into an inner class (UnityFrameSite) to avoid
-//  the diamond-inheritance problem from IOleWindow that appears in both
-//  IOleInPlaceSite and IOleInPlaceFrame.
+//  the diamond-inheritance problem from IOleWindow.
 // ---------------------------------------------------------------------------
 
 class UnityClientSite;   // forward
@@ -259,6 +269,97 @@ static void PaintStatus(HDC hdc, const RECT& rc)
 }
 
 // ---------------------------------------------------------------------------
+//  PlayerPrefs save path checker
+//
+//  Unity encodes the source path into the PlayerPrefs file name.
+//  Long or non-ASCII paths can exceed MAX_PATH, silently preventing saves.
+//  Warn the user before loading such a file.
+// ---------------------------------------------------------------------------
+
+// Encode a Windows path into the format Unity uses for PlayerPrefs filenames.
+static void UnityEncodeFilename(const char* ansiPath, char* out, int outLen)
+{
+    wchar_t wpath[MAX_PATH*2] = {};
+    MultiByteToWideChar(CP_ACP, 0, ansiPath, -1, wpath, MAX_PATH*2);
+    char utf8[MAX_PATH*4] = {};
+    WideCharToMultiByte(CP_UTF8, 0, wpath, -1, utf8, sizeof(utf8), nullptr, nullptr);
+
+    char* dst = out;
+    const char* limit = out + outLen - 16;
+
+    if (dst < limit) { memcpy(dst, "pref", 4); dst += 4; }
+
+    for (const unsigned char* p = (const unsigned char*)utf8; *p && dst < limit; p++) {
+        unsigned char b = *p;
+        if (b == '\\' || b == '/')       *dst++ = '-';
+        else if (b == ' ')               *dst++ = ' ';
+        else if (b >= 'a' && b <= 'z')   *dst++ = (char)b;
+        else if (b >= 'A' && b <= 'Z')   *dst++ = (char)(b + 32);
+        else if (b >= '0' && b <= '9')   *dst++ = (char)b;
+        else {
+            unsigned int uval = (unsigned int)(int)(signed char)b;
+            int written = snprintf(dst, limit - dst, "_%x", uval);
+            if (written > 0) dst += written;
+        }
+    }
+    if (dst + 4 < out + outLen) { memcpy(dst, ".upp", 4); dst[4] = '\0'; }
+}
+
+// Check whether the eventual save path would be too long.
+// Returns false if the user cancels after a warning.
+static bool CheckAndWarnSavePath(const char* gamePath)
+{
+    if (PathIsURLA(gamePath)) return true;   // remote URL – no local save path issue
+
+    char appData[MAX_PATH] = {};
+    if (!GetEnvironmentVariableA("APPDATA", appData, MAX_PATH) || !appData[0])
+        SHGetFolderPathA(nullptr, CSIDL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, appData);
+
+    char encoded[MAX_PATH * 40] = {};
+    UnityEncodeFilename(gamePath, encoded, sizeof(encoded));
+
+    char fullPath[MAX_PATH * 42] = {};
+    snprintf(fullPath, sizeof(fullPath),
+             "%s\\Unity\\WebPlayerPrefs\\localhost\\%s", appData, encoded);
+
+    int totalLen = (int)strlen(fullPath);
+    if (totalLen <= MAX_PATH) return true;
+
+    // Build a short preview of the path for the dialog
+    char dispPath[512] = {};
+    if (totalLen <= 480) {
+        strncpy(dispPath, fullPath, 480);
+    } else {
+        snprintf(dispPath, sizeof(dispPath), "%.200s  [...]  %.200s",
+                 fullPath, fullPath + totalLen - 200);
+    }
+
+    char msg[1024] = {};
+    snprintf(msg, sizeof(msg),
+        "Warning: Save data (PlayerPrefs) will NOT work!\n"
+        "\n"
+        "Unity Web Player encodes the game file path into the save\n"
+        "file name. The resulting path is %d characters long,\n"
+        "exceeding Windows' %d-character limit.\n"
+        "Windows will silently refuse to create the file.\n"
+        "\n"
+        "Expected save path (%d chars):\n"
+        "%s\n"
+        "\n"
+        "How to fix:\n"
+        "  - Move the game file to a short, all-ASCII folder\n"
+        "    e.g.  C:\\games\\game.unity3d\n"
+        "  - Rename the file to a shorter English-only name\n"
+        "\n"
+        "Load anyway (saves will NOT be written)?",
+        totalLen, MAX_PATH, totalLen, dispPath);
+
+    int res = MessageBoxA(g_hwndMain, msg, "Save Path Too Long - Warning",
+                          MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+    return (res == IDYES);
+}
+
+// ---------------------------------------------------------------------------
 //  Bundle header parsing
 //
 //  Unity bundle header layout (decimal offsets):
@@ -296,7 +397,7 @@ static BundleInfo ReadBundleFromFile(const char* path)
 static BundleInfo ReadBundleFromURL(const char* url)
 {
     unsigned char buf[64] = {};
-    HINTERNET hi = InternetOpenA(APP_NAME "/1.0", INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0);
+    HINTERNET hi = InternetOpenA(APP_NAME "/1.1", INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0);
     if (!hi) return {false, "", 0, 0};
     HINTERNET hu = InternetOpenUrlA(hi, url, nullptr, 0,
                                      INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE, 0);
@@ -402,10 +503,6 @@ static void CopyFolderContents(const char* src, const char* dest)
 }
 
 // Switch runtime to the channel matching major.minor.
-//   1. Delete destination folder (3.x.x) entirely
-//   2. Copy from Runtime\mono\<folder> to …\WebPlayer\mono\3.x.x
-//   3. Same for player\
-//   4. Write registry channel + directory keys
 static bool SwitchRuntime(int major, int minor)
 {
     RuntimeDef def = GetRuntimeDef(major, minor);
@@ -416,7 +513,6 @@ static bool SwitchRuntime(int major, int minor)
     sprintf(playerSrc, "%s\\Runtime\\player\\%s", g_exeDir, def.folder);
 
     if (!PathFileExistsA(monoSrc) || !PathFileExistsA(playerSrc)) {
-        // Tell the user exactly which folder is missing so they know what to fix
         char msg[512];
         sprintf(msg,
             "Runtime folder not found for channel [%s]:\n\n"
@@ -477,6 +573,98 @@ static bool SilentInstallWebPlayer()
     WaitForSingleObject(sei.hProcess, 120000);  // up to 2 min
     CloseHandle(sei.hProcess);
     return IsWebPlayerInstalled();
+}
+
+// ---------------------------------------------------------------------------
+//  MRU – Most Recently Used file list
+// ---------------------------------------------------------------------------
+static void MruLoad()
+{
+    g_mruCount = 0;
+    HKEY hk = nullptr;
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, REG_MRU_KEY, 0, KEY_READ, &hk) != ERROR_SUCCESS)
+        return;
+    for (int i = 0; i < MRU_MAX; i++) {
+        char name[4]; sprintf(name, "%d", i);
+        DWORD sz = (DWORD)sizeof(g_mruList[0]), type;
+        if (RegQueryValueExA(hk, name, nullptr, &type, (BYTE*)g_mruList[g_mruCount], &sz)
+                == ERROR_SUCCESS && type == REG_SZ && g_mruList[g_mruCount][0])
+            ++g_mruCount;
+        else break;
+    }
+    RegCloseKey(hk);
+}
+
+static void MruSave()
+{
+    HKEY hk = nullptr; DWORD disp;
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, REG_MRU_KEY,
+            0, nullptr, 0, KEY_WRITE, nullptr, &hk, &disp) != ERROR_SUCCESS)
+        return;
+    for (int i = 0; i < g_mruCount; i++) {
+        char name[4]; sprintf(name, "%d", i);
+        RegSetValueExA(hk, name, 0, REG_SZ,
+                       (const BYTE*)g_mruList[i], (DWORD)strlen(g_mruList[i]) + 1);
+    }
+    for (int i = g_mruCount; i < MRU_MAX; i++) {
+        char name[4]; sprintf(name, "%d", i);
+        RegDeleteValueA(hk, name);
+    }
+    RegCloseKey(hk);
+}
+
+static void MruAdd(const char* path)
+{
+    for (int i = 0; i < g_mruCount; i++) {
+        if (_stricmp(g_mruList[i], path) == 0) {
+            for (int j = i; j < g_mruCount - 1; j++)
+                strcpy(g_mruList[j], g_mruList[j + 1]);
+            --g_mruCount;
+            break;
+        }
+    }
+    if (g_mruCount >= MRU_MAX) g_mruCount = MRU_MAX - 1;
+    for (int i = g_mruCount; i > 0; i--)
+        strcpy(g_mruList[i], g_mruList[i - 1]);
+    strncpy(g_mruList[0], path, MAX_PATH * 2 - 1);
+    g_mruList[0][MAX_PATH * 2 - 1] = '\0';
+    ++g_mruCount;
+    MruSave();
+}
+
+static void RebuildFileMenu()
+{
+    HMENU hBar = GetMenu(g_hwndMain);
+    if (!hBar) return;
+    HMENU hFile = GetSubMenu(hBar, 0);
+    if (!hFile) return;
+
+    // Clear old MRU entries (keep permanent items at positions 0-3)
+    while (GetMenuItemCount(hFile) > 4)
+        DeleteMenu(hFile, 4, MF_BYPOSITION);
+
+    if (g_mruCount == 0) {
+        AppendMenuA(hFile, MF_STRING | MF_GRAYED, IDM_RECENT_EMPTY, "(No recent files)");
+    } else {
+        for (int i = 0; i < g_mruCount; i++) {
+            char esc[MAX_PATH * 2 + 4] = {};
+            const char* s = g_mruList[i];
+            char* d = esc;
+            while (*s && (d - esc) < (int)sizeof(esc) - 2) {
+                if (*s == '&') *d++ = '&';
+                *d++ = *s++;
+            }
+            char label[MAX_PATH * 2 + 8];
+            if (i < 9)
+                snprintf(label, sizeof(label), "&%d %s", i + 1, esc);
+            else
+                snprintf(label, sizeof(label), "1&0 %s", esc);
+            AppendMenuA(hFile, MF_STRING, IDM_RECENT_0 + i, label);
+        }
+    }
+    AppendMenuA(hFile, MF_SEPARATOR, 0, nullptr);
+    AppendMenuA(hFile, MF_STRING, IDM_FILE_EXIT, "E&xit");
+    DrawMenuBar(g_hwndMain);
 }
 
 // ---------------------------------------------------------------------------
@@ -554,7 +742,7 @@ static void UnityDestroy()
 }
 
 // Create Unity control, set properties (src etc.), then activate in-place.
-// 'src' may be a local Windows path or an http:// URL.
+// 'src' is the raw Windows path or URL – no conversion is done.
 static bool UnityCreate(HWND hwnd, const char* src)
 {
     g_pSite = new UnityClientSite(hwnd);
@@ -573,7 +761,7 @@ static bool UnityCreate(HWND hwnd, const char* src)
     // IDispatch for property access
     g_pOleObj->QueryInterface(IID_IDispatch, (void**)&g_pDisp);
 
-    // Set properties BEFORE activation (same order as UniPlayer)
+    // Set properties BEFORE activation
     UnitySetPropA("src",                src);
     UnitySetPropA("backgroundcolor",    "000000");
     UnitySetPropA("bordercolor",        "000000");
@@ -604,16 +792,22 @@ static void LoadFileOrUrl(const char* path)
 {
     bool isUrl = (PathIsURLA(path) == TRUE);
 
-    // 1. Detect bundle version
+    // 1. Check if PlayerPrefs save path would be too long
+    if (!CheckAndWarnSavePath(path)) return;
+
+    // 2. Detect bundle version
     SetStatus("Loading Player...");
     UpdateWindow(g_hwndMain);
 
     BundleInfo info = isUrl ? ReadBundleFromURL(path) : ReadBundleFromFile(path);
 
-    // 2. Destroy existing control (unloads old DLL)
+    strncpy(g_currentPath, path, sizeof(g_currentPath) - 1);
+    g_currentPath[sizeof(g_currentPath) - 1] = '\0';
+
+    // 3. Destroy existing control (unloads old DLL)
     UnityDestroy();
 
-    // 3. Switch runtime if version known
+    // 4. Switch runtime if version known
     if (info.valid) {
         char msg[160];
         snprintf(msg, sizeof(msg), "Loading Player...  [Unity %s -> %s]",
@@ -628,19 +822,28 @@ static void LoadFileOrUrl(const char* path)
         Sleep(150);
     }
 
-    // 4. Create Unity control with the new src
+    // 5. Create Unity control with the new src (raw path, no conversion)
     if (!UnityCreate(g_hwndMain, path)) {
         SetStatus("Error: failed to create Unity player. "
                   "Check that Unity Web Player is installed.");
+        g_currentPath[0] = '\0';
         return;
     }
 
     g_gameLoaded = true;
-    // Unity control now covers client area; WM_PAINT is suppressed by WS_CLIPCHILDREN
+    MruAdd(path);
+    RebuildFileMenu();
+}
+
+static void ReloadGame()
+{
+    if (!g_currentPath[0]) return;
+    LoadFileOrUrl(g_currentPath);
 }
 
 static void CloseGame()
 {
+    g_currentPath[0] = '\0';
     UnityDestroy();
     SetStatus("Drag a .unity3d file here, or use File > Open.");
 }
@@ -780,7 +983,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
 
     case WM_POSTINIT: {
-        // STEP 1: Runtime/ folder must exist FIRST, regardless of install state
+        // STEP 1: Runtime/ folder must exist FIRST
         if (!IsRuntimePackagePresent()) {
             SetStatus("Runtime not found, please download Runtime.zip.");
             ShowWindow(hwnd, SW_SHOW); UpdateWindow(hwnd);
@@ -803,6 +1006,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         // STEP 3: Ready — show default status
         SetStatus("Drag a .unity3d file here, or use File > Open.");
+        RebuildFileMenu();
 
         // STEP 4: Load command-line file if provided
         if (g_pendingFile[0]) {
@@ -820,10 +1024,33 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
 
-    case WM_COMMAND:
-        switch (LOWORD(wp)) {
+    case WM_INITMENUPOPUP: {
+        HMENU hFile = GetSubMenu(GetMenu(hwnd), 0);
+        if ((HMENU)wp == hFile) {
+            RebuildFileMenu();
+            UINT ena = g_gameLoaded ? MF_ENABLED : MF_GRAYED;
+            EnableMenuItem(hFile, IDM_FILE_RELOAD, MF_BYCOMMAND | ena);
+            EnableMenuItem(hFile, IDM_FILE_CLOSE,  MF_BYCOMMAND | ena);
+        }
+        return 0;
+    }
+
+    case WM_COMMAND: {
+        WORD id = LOWORD(wp);
+        if (id >= IDM_RECENT_0 && id < IDM_RECENT_0 + MRU_MAX) {
+            int idx = id - IDM_RECENT_0;
+            if (idx < g_mruCount) LoadFileOrUrl(g_mruList[idx]);
+            return 0;
+        }
+        switch (id) {
         case IDM_FILE_OPEN:
             if (ShowOpenDialog()) LoadFileOrUrl(g_openResult);
+            break;
+        case IDM_FILE_RELOAD:
+            ReloadGame();
+            break;
+        case IDM_FILE_CLOSE:
+            CloseGame();
             break;
         case IDM_FILE_EXIT:
             DestroyWindow(hwnd); break;
@@ -835,6 +1062,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             DialogBoxA(g_hInst, MAKEINTRESOURCEA(IDD_ABOUT), hwnd, AboutDlgProc); break;
         }
         return 0;
+    }
 
     case WM_DROPFILES: {
         HDROP hd = (HDROP)wp;
@@ -894,10 +1122,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow)
     if (__argc >= 2 && __argv[1][0])
         strncpy(g_pendingFile, __argv[1], sizeof(g_pendingFile) - 1);
 
+    MruLoad();
     OleInitialize(nullptr);
 
-    // Register window class (WS_CLIPCHILDREN keeps Unity child from being
-    // painted over when the main window receives WM_PAINT)
+    // Register window class
     WNDCLASSEXA wc = {};
     wc.cbSize        = sizeof(wc);
     wc.style         = CS_HREDRAW | CS_VREDRAW;
