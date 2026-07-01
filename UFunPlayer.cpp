@@ -30,13 +30,16 @@
 //  Constants
 // ---------------------------------------------------------------------------
 #define APP_NAME       "UFunPlayer"
-#define APP_VERSION    "1.1"
+#define APP_VERSION    "1.2"
 #define GITHUB_URL     "https://github.com/mtdcmz/UFunPlayer"
 #define RUNTIME_DL_URL "https://github.com/mtdcmz/UFunPlayer/releases/latest/download/Runtime.zip"
 
-// Recent files MRU
-#define REG_MRU_KEY    "Software\\UFunPlayer\\RecentFiles"
+// Registry keys
+#define REG_ROOT_KEY     "Software\\UFunPlayer"
+#define REG_MRU_KEY      REG_ROOT_KEY "\\RecentFiles"
+#define REG_SETTINGS_KEY REG_ROOT_KEY "\\Settings"
 #define MRU_MAX        10
+#define TOOLS_MAX      64
 
 // Unity Web Player ActiveX CLSID  {444785F1-DE89-4295-863A-D46C3A781394}
 static const CLSID CLSID_UnityWebPlayer = {
@@ -45,8 +48,8 @@ static const CLSID CLSID_UnityWebPlayer = {
 };
 
 // Custom window messages
-#define WM_POSTINIT  (WM_APP + 1)
-#define WM_LOADFILE  (WM_APP + 2)
+#define WM_POSTINIT  (WM_APP + 1)   // deferred init after window is visible
+#define WM_LOADFILE  (WM_APP + 2)   // lParam = heap-allocated char* path (caller frees)
 
 // ---------------------------------------------------------------------------
 //  Global state
@@ -65,8 +68,8 @@ class UnityClientSite;
 static UnityClientSite* g_pSite = nullptr;
 
 // App state
-static bool g_unityReady  = false;
-static bool g_gameLoaded  = false;
+static bool g_unityReady  = false;   // Unity control is alive
+static bool g_gameLoaded  = false;   // a game is currently running
 static bool g_fullscreen  = false;
 static RECT g_savedRect   = {};
 
@@ -83,6 +86,12 @@ static char g_pendingFile[MAX_PATH * 2] = {};
 static char g_mruList[MRU_MAX][MAX_PATH * 2];
 static int  g_mruCount = 0;
 
+// Tools menu state – persisted via REG_SETTINGS_KEY\ToolsEnabled
+static bool g_toolsEnabled = false;
+static char g_toolsList[TOOLS_MAX][MAX_PATH];   // full path, incl. .exe
+static char g_toolsName[TOOLS_MAX][MAX_PATH];   // display name, .exe stripped
+static int  g_toolsCount = 0;
+
 // ---------------------------------------------------------------------------
 //  Forward declarations
 // ---------------------------------------------------------------------------
@@ -90,6 +99,7 @@ LRESULT CALLBACK MainWndProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK OpenDlgProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK AboutDlgProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK DownloadDlgProc(HWND, UINT, WPARAM, LPARAM);
+INT_PTR CALLBACK ToolsWarningDlgProc(HWND, UINT, WPARAM, LPARAM);
 
 static void  UnityDestroy();
 static bool  UnityCreate(HWND hwnd, const char* src);
@@ -100,6 +110,11 @@ static void  CloseGame();
 static void  SetStatus(const char* text);
 static void  ToggleFullscreen();
 static void  RebuildFileMenu();
+static void  RebuildToolsMenu();
+static void  ScanToolsFolder();
+static void  EnableTools();
+static void  LaunchTool(const char* exePath);
+static void  ClearUserData();
 
 // ---------------------------------------------------------------------------
 //  OLE container site
@@ -287,6 +302,7 @@ static void UnityEncodeFilename(const char* ansiPath, char* out, int outLen)
     char* dst = out;
     const char* limit = out + outLen - 16;
 
+    // prefix "pref"
     if (dst < limit) { memcpy(dst, "pref", 4); dst += 4; }
 
     for (const unsigned char* p = (const unsigned char*)utf8; *p && dst < limit; p++) {
@@ -302,6 +318,7 @@ static void UnityEncodeFilename(const char* ansiPath, char* out, int outLen)
             if (written > 0) dst += written;
         }
     }
+    // suffix ".upp"
     if (dst + 4 < out + outLen) { memcpy(dst, ".upp", 4); dst[4] = '\0'; }
 }
 
@@ -613,8 +630,13 @@ static void MruSave()
     RegCloseKey(hk);
 }
 
-static void MruAdd(const char* path)
+static void MruAdd(const char* pathArg)
 {
+    // Defensive copy – prevents aliasing if pathArg points into g_mruList itself
+    char path[MAX_PATH * 2];
+    strncpy(path, pathArg, sizeof(path) - 1);
+    path[sizeof(path) - 1] = '\0';
+
     for (int i = 0; i < g_mruCount; i++) {
         if (_stricmp(g_mruList[i], path) == 0) {
             for (int j = i; j < g_mruCount - 1; j++)
@@ -665,6 +687,148 @@ static void RebuildFileMenu()
     AppendMenuA(hFile, MF_SEPARATOR, 0, nullptr);
     AppendMenuA(hFile, MF_STRING, IDM_FILE_EXIT, "E&xit");
     DrawMenuBar(g_hwndMain);
+}
+
+// ---------------------------------------------------------------------------
+//  Tools menu – launch external programs from Tools\ folder
+// ---------------------------------------------------------------------------
+static void SettingsLoad()
+{
+    g_toolsEnabled = false;
+    HKEY hk = nullptr;
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, REG_SETTINGS_KEY, 0, KEY_READ, &hk) == ERROR_SUCCESS) {
+        DWORD val = 0, sz = sizeof(val), type = 0;
+        if (RegQueryValueExA(hk, "ToolsEnabled", nullptr, &type, (BYTE*)&val, &sz) == ERROR_SUCCESS
+                && type == REG_DWORD)
+            g_toolsEnabled = (val != 0);
+        RegCloseKey(hk);
+    }
+}
+
+static void SettingsSaveToolsEnabled()
+{
+    HKEY hk = nullptr; DWORD disp;
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, REG_SETTINGS_KEY,
+            0, nullptr, 0, KEY_WRITE, nullptr, &hk, &disp) == ERROR_SUCCESS) {
+        DWORD val = g_toolsEnabled ? 1 : 0;
+        RegSetValueExA(hk, "ToolsEnabled", 0, REG_DWORD, (const BYTE*)&val, sizeof(val));
+        RegCloseKey(hk);
+    }
+}
+
+// Scan Tools\ for *.exe files – updates g_toolsList / g_toolsName
+static void ScanToolsFolder()
+{
+    g_toolsCount = 0;
+
+    char dir[MAX_PATH];
+    sprintf(dir, "%s\\Tools", g_exeDir);
+
+    char wild[MAX_PATH];
+    sprintf(wild, "%s\\*.exe", dir);
+
+    WIN32_FIND_DATAA fd = {};
+    HANDLE hf = FindFirstFileA(wild, &fd);
+    if (hf == INVALID_HANDLE_VALUE) return;
+
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        if (g_toolsCount >= TOOLS_MAX) break;
+
+        sprintf(g_toolsList[g_toolsCount], "%s\\%s", dir, fd.cFileName);
+
+        // Display name = filename with ".exe" stripped
+        strncpy(g_toolsName[g_toolsCount], fd.cFileName, MAX_PATH - 1);
+        g_toolsName[g_toolsCount][MAX_PATH - 1] = '\0';
+        char* dot = strrchr(g_toolsName[g_toolsCount], '.');
+        if (dot && _stricmp(dot, ".exe") == 0) *dot = '\0';
+
+        g_toolsCount++;
+    } while (FindNextFileA(hf, &fd));
+    FindClose(hf);
+}
+
+// Rebuild the Tools menu from in-memory state
+static void RebuildToolsMenu()
+{
+    HMENU hBar = GetMenu(g_hwndMain); if (!hBar) return;
+    HMENU hTools = GetSubMenu(hBar, 3); if (!hTools) return;  // File,View,Control,Tools,Help
+
+    while (GetMenuItemCount(hTools) > 0)
+        DeleteMenu(hTools, 0, MF_BYPOSITION);
+
+    if (!g_toolsEnabled) {
+        AppendMenuA(hTools, MF_STRING, IDM_TOOLS_ENABLE, "&Enable Tools");
+        DrawMenuBar(g_hwndMain);
+        return;
+    }
+
+    AppendMenuA(hTools, MF_STRING, IDM_TOOLS_REFRESH, "&Refresh");
+    AppendMenuA(hTools, MF_SEPARATOR, 0, nullptr);
+
+    if (g_toolsCount == 0) {
+        AppendMenuA(hTools, MF_STRING | MF_GRAYED, IDM_TOOLS_EMPTY, "(No tools found in Tools\\)");
+    } else {
+        for (int i = 0; i < g_toolsCount; i++) {
+            char esc[MAX_PATH + 4] = {}; const char* s = g_toolsName[i]; char* d = esc;
+            while (*s && (d - esc) < (int)sizeof(esc) - 2) { if (*s == '&') *d++ = '&'; *d++ = *s++; }
+            AppendMenuA(hTools, MF_STRING, IDM_TOOLS_ITEM_0 + i, esc);
+        }
+    }
+    DrawMenuBar(g_hwndMain);
+}
+
+// Enable the Tools feature – creates Tools\ folder, scans it, updates menu
+static void EnableTools()
+{
+    g_toolsEnabled = true;
+    SettingsSaveToolsEnabled();
+
+    // Make sure Tools\ exists
+    char toolsDir[MAX_PATH];
+    sprintf(toolsDir, "%s\\Tools", g_exeDir);
+    SHCreateDirectoryExA(nullptr, toolsDir, nullptr);
+
+    ScanToolsFolder();
+    RebuildToolsMenu();
+}
+
+// Launch a tool exe with its own folder as the working directory
+static void LaunchTool(const char* exePath)
+{
+    char dir[MAX_PATH];
+    strncpy(dir, exePath, MAX_PATH - 1);
+    dir[MAX_PATH - 1] = '\0';
+    PathRemoveFileSpecA(dir);
+
+    SHELLEXECUTEINFOA sei = {};
+    sei.cbSize     = sizeof(sei);
+    sei.fMask      = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb     = "open";
+    sei.lpFile     = exePath;
+    sei.lpDirectory = dir;
+    sei.nShow      = SW_SHOWNORMAL;
+
+    if (!ShellExecuteExA(&sei)) {
+        char msg[MAX_PATH + 64];
+        snprintf(msg, sizeof(msg), "Failed to launch:\n%s", exePath);
+        MessageBoxA(g_hwndMain, msg, "Launch Tool", MB_ICONERROR);
+        return;
+    }
+    if (sei.hProcess) CloseHandle(sei.hProcess);   // fire and forget
+}
+
+// Wipe all UFunPlayer registry data (MRU + Tools enabled flag)
+static void ClearUserData()
+{
+    SHDeleteKeyA(HKEY_CURRENT_USER, REG_ROOT_KEY);
+
+    g_mruCount     = 0;
+    g_toolsEnabled = false;
+    g_toolsCount   = 0;
+
+    RebuildFileMenu();
+    RebuildToolsMenu();
 }
 
 // ---------------------------------------------------------------------------
@@ -788,8 +952,13 @@ static bool UnityCreate(HWND hwnd, const char* src)
 // ---------------------------------------------------------------------------
 //  Game loading – the central function
 // ---------------------------------------------------------------------------
-static void LoadFileOrUrl(const char* path)
+static void LoadFileOrUrl(const char* pathArg)
 {
+    // Defensive copy – pathArg may alias g_mruList[] or g_currentPath
+    char path[MAX_PATH * 2];
+    strncpy(path, pathArg, sizeof(path) - 1);
+    path[sizeof(path) - 1] = '\0';
+
     bool isUrl = (PathIsURLA(path) == TRUE);
 
     // 1. Check if PlayerPrefs save path would be too long
@@ -970,6 +1139,18 @@ INT_PTR CALLBACK DownloadDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM)
     return FALSE;
 }
 
+INT_PTR CALLBACK ToolsWarningDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM)
+{
+    if (msg == WM_COMMAND) {
+        WORD id = LOWORD(wp);
+        if (id == IDOK || id == IDCANCEL) {
+            EndDialog(hDlg, id);
+            return TRUE;
+        }
+    }
+    return msg == WM_INITDIALOG ? TRUE : FALSE;
+}
+
 // ---------------------------------------------------------------------------
 //  Main window procedure
 // ---------------------------------------------------------------------------
@@ -989,7 +1170,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             ShowWindow(hwnd, SW_SHOW); UpdateWindow(hwnd);
             DialogBoxA(g_hInst, MAKEINTRESOURCEA(IDD_DOWNLOAD), hwnd, DownloadDlgProc);
             if (!IsRuntimePackagePresent()) {
-                SetStatus("Runtime not found. Download Runtime.zip from GitHub and extract next to UFunPlayer.exe.");
+                SetStatus("Runtime not found. Download Runtime.zip from GitHub.");
                 return 0;
             }
         }
@@ -1004,9 +1185,10 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
         }
 
-        // STEP 3: Ready — show default status
+        // STEP 3: Ready — show default status, build menus
         SetStatus("Drag a .unity3d file here, or use File > Open.");
         RebuildFileMenu();
+        RebuildToolsMenu();
 
         // STEP 4: Load command-line file if provided
         if (g_pendingFile[0]) {
@@ -1042,6 +1224,11 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (idx < g_mruCount) LoadFileOrUrl(g_mruList[idx]);
             return 0;
         }
+        if (id >= IDM_TOOLS_ITEM_0 && id < IDM_TOOLS_ITEM_0 + TOOLS_MAX) {
+            int idx = id - IDM_TOOLS_ITEM_0;
+            if (idx < g_toolsCount) LaunchTool(g_toolsList[idx]);
+            return 0;
+        }
         switch (id) {
         case IDM_FILE_OPEN:
             if (ShowOpenDialog()) LoadFileOrUrl(g_openResult);
@@ -1056,8 +1243,26 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             DestroyWindow(hwnd); break;
         case IDM_VIEW_FULLSCREEN:
             ToggleFullscreen(); break;
+        case IDM_TOOLS_ENABLE:
+            if (DialogBoxA(g_hInst, MAKEINTRESOURCEA(IDD_TOOLS_WARNING), hwnd, ToolsWarningDlgProc) == IDOK)
+                EnableTools();
+            break;
+        case IDM_TOOLS_REFRESH:
+            ScanToolsFolder(); RebuildToolsMenu(); break;
         case IDM_HELP_REPO:
             ShellExecuteA(hwnd, "open", GITHUB_URL, nullptr, nullptr, SW_SHOWNORMAL); break;
+        case IDM_HELP_CLEARDATA: {
+            int r = MessageBoxA(hwnd,
+                "This clears your recent-file history and resets the\n"
+                "Tools warning prompt (Tools will need to be re-enabled).\n\n"
+                "Continue?",
+                "Clear User Data", MB_YESNO | MB_ICONQUESTION);
+            if (r == IDYES) {
+                ClearUserData();
+                MessageBoxA(hwnd, "User data has been cleared.", "Clear User Data", MB_OK | MB_ICONINFORMATION);
+            }
+            break;
+        }
         case IDM_HELP_ABOUT:
             DialogBoxA(g_hInst, MAKEINTRESOURCEA(IDD_ABOUT), hwnd, AboutDlgProc); break;
         }
@@ -1123,9 +1328,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow)
         strncpy(g_pendingFile, __argv[1], sizeof(g_pendingFile) - 1);
 
     MruLoad();
+    SettingsLoad();
+    if (g_toolsEnabled) ScanToolsFolder();   // scan once per launch if previously enabled
     OleInitialize(nullptr);
 
-    // Register window class
+    // Register window class (WS_CLIPCHILDREN keeps Unity child from being
+    // painted over when the main window receives WM_PAINT)
     WNDCLASSEXA wc = {};
     wc.cbSize        = sizeof(wc);
     wc.style         = CS_HREDRAW | CS_VREDRAW;

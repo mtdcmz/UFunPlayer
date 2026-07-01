@@ -9,9 +9,11 @@ IDI_MAINICON  ICON "ufunplayer.ico"
 IDI_SMALLICON ICON "ufunplayer.ico"
 
 // --- Main Menu ---------------------------------------------------------------
-// File menu: only static top items here.
-// Recent files + separator + Exit are inserted dynamically by RebuildFileMenu()
-// via WM_INITMENUPOPUP, so they never appear half-built.
+// File menu: only static top items here; recent files + separator + Exit are
+// inserted dynamically by RebuildFileMenu().
+// Tools menu: fully rebuilt at runtime by RebuildToolsMenu() — the single
+// static item below is just the pre-scan placeholder shown before the first
+// rebuild happens (WM_POSTINIT replaces it immediately on startup).
 IDR_MAINMENU MENU
 BEGIN
     POPUP "&File"
@@ -34,9 +36,15 @@ BEGIN
             MENUITEM "&High",   IDM_CTRL_QUALITY_H, GRAYED
         END
     END
+    POPUP "&Tools"
+    BEGIN
+        MENUITEM "&Enable Tools", IDM_TOOLS_ENABLE
+    END
     POPUP "&Help"
     BEGIN
         MENUITEM "&GitHub Repository",   IDM_HELP_REPO
+        MENUITEM SEPARATOR
+        MENUITEM "Clear User &Data...",  IDM_HELP_CLEARDATA
         MENUITEM SEPARATOR
         MENUITEM "&About UFunPlayer...", IDM_HELP_ABOUT
     END
@@ -72,7 +80,7 @@ CAPTION "About UFunPlayer"
 FONT 8, "MS Shell Dlg"
 BEGIN
     ICON          IDI_MAINICON, IDC_STATIC, 10, 10, 0, 0
-    LTEXT         "UFunPlayer 1.1",                        IDC_STATIC, 48, 12, 220, 12
+    LTEXT         "UFunPlayer 1.2",                        IDC_STATIC, 48, 12, 220, 12
     LTEXT         "A Standalone Unity Web Player",         IDC_STATIC, 48, 24, 220, 10
     LTEXT         "https://github.com/mtdcmz/UFunPlayer",  IDC_STATIC, 48, 36, 220, 10
     LTEXT         "",                                      IDC_STATIC, 10, 56, 260,  1, SS_ETCHEDHORZ
@@ -94,4 +102,21 @@ BEGIN
     PUSHBUTTON    "Open &Download Page", IDC_DL_BROWSER,  10, 110, 110, 14
     DEFPUSHBUTTON "I'll do it &later",   IDOK,           176, 110,  64, 14
     PUSHBUTTON    "Cancel",              IDCANCEL,       248, 110,  60, 14
+END
+
+// --- Tools Warning Dialog -----------------------------------------------------
+IDD_TOOLS_WARNING DIALOG 0, 0, 300, 142
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Enable Tools - Warning"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT         "Tools are third-party programs that you add yourself.",   IDC_STATIC, 10, 10, 280, 10
+    LTEXT         "UFunPlayer does not vet, sandbox, or verify them.",       IDC_STATIC, 10, 22, 280, 10
+    LTEXT         "Only download tools from sources you trust, and place",   IDC_STATIC, 10, 38, 280, 10
+    LTEXT         "them in the Tools\\ folder next to UFunPlayer.exe",       IDC_STATIC, 10, 50, 280, 10
+    LTEXT         "(the same folder that contains Runtime\\).",              IDC_STATIC, 10, 62, 280, 10
+    LTEXT         "Running an untrusted program can harm your computer.",    IDC_STATIC, 10, 78, 280, 10
+    LTEXT         "You will not be asked again after agreeing.",             IDC_STATIC, 10, 94, 280, 10
+    DEFPUSHBUTTON "I Understand, &Enable Tools", IDOK,     45, 118, 130, 14
+    PUSHBUTTON    "Cancel",                       IDCANCEL, 185, 118,  60, 14
 END
