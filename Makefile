@@ -6,11 +6,14 @@ SRC     = UFunPlayer.cpp
 RESOBJ  = resource.o
 
 CFLAGS  = -m32 -std=c++14 -O2 -Wall -Wextra \
+          -DUNICODE -D_UNICODE \
           -DWINVER=0x0600 -D_WIN32_WINNT=0x0600 -D_WIN32_IE=0x0700
 
-LDFLAGS = -mwindows -m32 -static
+# -municode selects the wide-entry CRT startup (wWinMainCRTStartup), which
+# is what calls our wWinMain instead of an ANSI WinMain. Without this flag
+# the linker will complain about a missing WinMain / duplicate entry point.
+LDFLAGS = -mwindows -municode -m32 -static
 
-# urlmon removed — GetMoniker reverted to E_NOTIMPL, no longer needed
 LIBS    = -lole32 -loleaut32 -luuid \
           -lshell32 -lshlwapi -lcomctl32 -lwininet -lcomdlg32
 

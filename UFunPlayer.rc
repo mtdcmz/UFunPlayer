@@ -11,9 +11,16 @@ IDI_SMALLICON ICON "ufunplayer.ico"
 // --- Main Menu ---------------------------------------------------------------
 // File menu: only static top items here; recent files + separator + Exit are
 // inserted dynamically by RebuildFileMenu().
-// Tools menu: fully rebuilt at runtime by RebuildToolsMenu() — the single
-// static item below is just the pre-scan placeholder shown before the first
-// rebuild happens (WM_POSTINIT replaces it immediately on startup).
+// Tools menu: fully rebuilt at runtime by RebuildToolsMenu().
+// Control > Language: fully rebuilt at runtime by RebuildLanguageMenu() - the
+// single static item below ("English (Built-in)") is the permanent, always-
+// present fallback entry; WM_INITMENUPOPUP repopulates the rest each time the
+// submenu is opened.
+// All static labels below are placeholder English text overridden at runtime
+// by ApplyMenuLanguage() (see UFunPlayer.cpp) once the language table is
+// loaded - this .rc text is only what a broken/missing string table would
+// fall back to, so it should stay in sync with InitDefaultStrings() but is
+// not itself read at runtime under normal operation.
 IDR_MAINMENU MENU
 BEGIN
     POPUP "&File"
@@ -34,6 +41,10 @@ BEGIN
             MENUITEM "&Low",    IDM_CTRL_QUALITY_L, GRAYED
             MENUITEM "&Medium", IDM_CTRL_QUALITY_M, GRAYED
             MENUITEM "&High",   IDM_CTRL_QUALITY_H, GRAYED
+        END
+        POPUP "&Language"
+        BEGIN
+            MENUITEM "English (Built-in)", IDM_LANG_BUILTIN_EN
         END
     END
     POPUP "&Tools"
@@ -59,64 +70,70 @@ BEGIN
 END
 
 // --- Open Dialog -------------------------------------------------------------
+// LTEXT labels now carry real IDs (IDC_OPEN_*) so ApplyDialogLanguage() can
+// override them; layout unchanged from v1.2 since English/most languages fit
+// these short single lines comfortably.
 IDD_OPEN DIALOG 0, 0, 330, 112
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Open (UFunPlayer)"
 FONT 8, "MS Shell Dlg"
 BEGIN
-    LTEXT         "Enter the network location (URL) of a .unity3d file:", IDC_STATIC, 10, 10, 310, 10
+    LTEXT         "Enter the network location (URL) of a .unity3d file:", IDC_OPEN_URLLABEL, 10, 10, 310, 10
     EDITTEXT      IDC_URLEDIT, 10, 22, 310, 14, ES_AUTOHSCROLL
-    LTEXT         "Example:  http://example.com/game.unity3d",            IDC_STATIC, 10, 40, 310, 10
-    LTEXT         "--- or browse your local files ---",                   IDC_STATIC, 10, 56, 310, 10, SS_CENTER
+    LTEXT         "Example:  http://example.com/game.unity3d",            IDC_OPEN_EXAMPLE, 10, 40, 310, 10
+    LTEXT         "--- or browse your local files ---",                   IDC_OPEN_SEPARATOR, 10, 56, 310, 10, SS_CENTER
     PUSHBUTTON    "&Browse...", IDC_BROWSE,  10, 70,  60, 14
     DEFPUSHBUTTON "&OK",        IDOK,       210, 90,  50, 14
     PUSHBUTTON    "Cancel",     IDCANCEL,   268, 90,  50, 14
 END
 
 // --- About Dialog ------------------------------------------------------------
+// IDC_ABOUT_VERSION text is set from code (APP_NAME + APP_VERSION), not from
+// the language table - the version string itself isn't "translatable".
 IDD_ABOUT DIALOG 0, 0, 280, 90
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "About UFunPlayer"
 FONT 8, "MS Shell Dlg"
 BEGIN
     ICON          IDI_MAINICON, IDC_STATIC, 10, 10, 0, 0
-    LTEXT         "UFunPlayer 1.2",                        IDC_STATIC, 48, 12, 220, 12
-    LTEXT         "A Standalone Unity Web Player",         IDC_STATIC, 48, 24, 220, 10
+    LTEXT         "UFunPlayer 1.2p",                       IDC_ABOUT_VERSION, 48, 12, 220, 12
+    LTEXT         "A Standalone Unity Web Player",         IDC_ABOUT_TAGLINE, 48, 24, 220, 10
     LTEXT         "https://github.com/mtdcmz/UFunPlayer",  IDC_STATIC, 48, 36, 220, 10
     LTEXT         "",                                      IDC_STATIC, 10, 56, 260,  1, SS_ETCHEDHORZ
     DEFPUSHBUTTON "OK", IDOK, 115, 68, 50, 14
 END
 
 // --- Download / Runtime-Not-Found Dialog -------------------------------------
-IDD_DOWNLOAD DIALOG 0, 0, 320, 148
+// The former 2-line explanation is now ONE taller auto-wrapping LTEXT
+// (IDC_DL_BODY) so translated text of any length wraps naturally instead of
+// being forced to match English's exact line breaks.
+IDD_DOWNLOAD DIALOG 0, 0, 320, 160
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Runtime Package Not Found"
 FONT 8, "MS Shell Dlg"
 BEGIN
-    LTEXT         "The Unity Web Player runtime files were not found.",                IDC_STATIC,  10,  10, 300, 10
-    LTEXT         "Expected location:",                                                IDC_STATIC,  10,  24, 300, 10
+    LTEXT         "The Unity Web Player runtime files were not found.", IDC_DL_NOTFOUND,    10,  10, 300, 10
+    LTEXT         "Expected location:",                                 IDC_DL_EXPECTED_LBL, 10,  24, 300, 10
     EDITTEXT      IDC_DL_PATH, 10, 36, 300, 14, ES_READONLY | ES_AUTOHSCROLL
-    LTEXT         "Download Runtime.zip from GitHub and extract it so that",           IDC_STATIC,  10,  58, 300, 10
-    LTEXT         "Runtime\\mono\\ and Runtime\\player\\ sit next to UFunPlayer.exe.", IDC_STATIC,  10,  70, 300, 10
-    LTEXT         "URL: https://github.com/mtdcmz/UFunPlayer/releases/latest",        IDC_STATIC,  10,  86, 300, 10
-    PUSHBUTTON    "Open &Download Page", IDC_DL_BROWSER,  10, 110, 110, 14
-    DEFPUSHBUTTON "I'll do it &later",   IDOK,           176, 110,  64, 14
-    PUSHBUTTON    "Cancel",              IDCANCEL,       248, 110,  60, 14
+    LTEXT         "Download Runtime.zip from GitHub and extract it so that Runtime\\mono\\ and Runtime\\player\\ sit next to UFunPlayer.exe.",
+                  IDC_DL_BODY, 10, 58, 300, 36
+    LTEXT         "URL: https://github.com/mtdcmz/UFunPlayer/releases/latest", IDC_DL_URLLABEL, 10, 98, 300, 10
+    PUSHBUTTON    "Open &Download Page", IDC_DL_BROWSER,  10, 122, 110, 14
+    DEFPUSHBUTTON "I'll do it &later",   IDOK,           176, 122,  64, 14
+    PUSHBUTTON    "Cancel",              IDCANCEL,       248, 122,  60, 14
 END
 
 // --- Tools Warning Dialog -----------------------------------------------------
-IDD_TOOLS_WARNING DIALOG 0, 0, 300, 142
+// The former 5-line explanation is now ONE taller auto-wrapping LTEXT
+// (IDC_TW_BODY), same rationale as the Download dialog above.
+IDD_TOOLS_WARNING DIALOG 0, 0, 300, 150
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Enable Tools - Warning"
 FONT 8, "MS Shell Dlg"
 BEGIN
-    LTEXT         "Tools are third-party programs that you add yourself.",   IDC_STATIC, 10, 10, 280, 10
-    LTEXT         "UFunPlayer does not vet, sandbox, or verify them.",       IDC_STATIC, 10, 22, 280, 10
-    LTEXT         "Only download tools from sources you trust, and place",   IDC_STATIC, 10, 38, 280, 10
-    LTEXT         "them in the Tools\\ folder next to UFunPlayer.exe",       IDC_STATIC, 10, 50, 280, 10
-    LTEXT         "(the same folder that contains Runtime\\).",              IDC_STATIC, 10, 62, 280, 10
-    LTEXT         "Running an untrusted program can harm your computer.",    IDC_STATIC, 10, 78, 280, 10
-    LTEXT         "You will not be asked again after agreeing.",             IDC_STATIC, 10, 94, 280, 10
-    DEFPUSHBUTTON "I Understand, &Enable Tools", IDOK,     45, 118, 130, 14
-    PUSHBUTTON    "Cancel",                       IDCANCEL, 185, 118,  60, 14
+    LTEXT         "Tools are third-party programs that you add yourself. UFunPlayer does not vet, sandbox, or verify them. Only download tools from sources you trust, and place them in the Tools\\ folder next to UFunPlayer.exe (the same folder that contains Runtime\\). Running an untrusted program can harm your computer.",
+                  IDC_TW_BODY, 10, 10, 280, 78
+    LTEXT         "You will not be asked again after agreeing.", IDC_TW_NOASKAGAIN, 10, 92, 280, 18
+    DEFPUSHBUTTON "I Understand, &Enable Tools", IDOK,     45, 126, 130, 14
+    PUSHBUTTON    "Cancel",                       IDCANCEL, 185, 126,  60, 14
 END
