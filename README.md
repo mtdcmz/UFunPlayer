@@ -23,6 +23,10 @@ UFunPlayer can launch external tools (e.g., decompilers, asset extractors, or cu
 
 > **Note:** Enabling the Tools feature allows arbitrary executables to be run. Only place trusted tools in the `Tools` folder.
 
+## Language Packs
+
+Interface translations are supported via `.lang` files placed in a `langs` folder next to the executable. They are selected under **Control → Language**.
+
 ## Save Data (PlayerPrefs) Warning
 
 Unity Web Player saves game data (PlayerPrefs) by encoding the **full path** of
