@@ -850,7 +850,6 @@ static bool ParseLanguageFile(const wchar_t* path, bool applyToTable,
                 char* keyEnd = rawKey + strlen(rawKey);
                 while (keyEnd > rawKey && (keyEnd[-1] == ' ' || keyEnd[-1] == '\t')) *(--keyEnd) = '\0';
 
-                // Unescape \n, \t, \\
                 char unescaped[LANG_VAL_LEN * 4] = {};
                 char* d = unescaped;
                 const char* s = rawVal;
