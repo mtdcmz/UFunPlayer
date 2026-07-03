@@ -1,0 +1,102 @@
+# UFunPlayer Sprachpaket — Deutsch
+# Format: SCHLÜSSEL=Wert (UTF-8-Kodierung, Zeilen mit '#' sind Kommentare,
+# Leerzeilen werden ignoriert).
+# Escape-Zeichen: \n = Zeilenumbruch, \t = Tabulator, \\ = Backslash selbst.
+# Bitte beim Übersetzen die ANZAHL UND REIHENFOLGE der Platzhalter %s / %d
+# exakt wie im Original beibehalten — sie werden positionsbasiert eingesetzt.
+
+LANG_NAME=Deutsch
+LANG_CODE=de
+
+# --- Menüleiste ---------------------------------------------------------------
+MENU_FILE=&Datei
+MENU_VIEW=&Ansicht
+MENU_CONTROL=&Steuerung
+MENU_TOOLS=&Werkzeuge
+MENU_HELP=&Hilfe
+
+# --- Menü „Datei" ---------------------------------------------------------------
+MENU_FILE_OPEN=Ö&ffnen...
+MENU_FILE_RELOAD=Neu &laden
+MENU_FILE_CLOSE=&Schließen
+MENU_FILE_EXIT=&Beenden
+FILE_NO_RECENT=(Keine zuletzt verwendeten Dateien)
+
+# --- Menü „Ansicht" ---------------------------------------------------------------
+MENU_VIEW_FULLSCREEN=&Vollbild
+
+# --- Menü „Steuerung" ---------------------------------------------------------------
+MENU_CTRL_QUALITY=&Qualität
+MENU_CTRL_QUALITY_LOW=&Niedrig
+MENU_CTRL_QUALITY_MED=&Mittel
+MENU_CTRL_QUALITY_HIGH=&Hoch
+MENU_CTRL_LANGUAGE=&Sprache
+LANG_BUILTIN_EN=English (integriert)
+
+# --- Menü „Werkzeuge" ---------------------------------------------------------------
+TOOLS_ENABLE=Werkzeuge &aktivieren
+TOOLS_REFRESH=&Aktualisieren
+TOOLS_EMPTY=(Keine Werkzeuge im Ordner Tools\\ gefunden)
+
+# --- Menü „Hilfe" ---------------------------------------------------------------
+MENU_HELP_REPO=&GitHub-Repository
+MENU_HELP_CLEARDATA=Benutzer&daten löschen...
+MENU_HELP_ABOUT=Ü&ber UFunPlayer...
+
+# --- Status- / Platzhaltertext -----------------------------------------------------------
+STATUS_IDLE=Ziehen Sie eine .unity3d-Datei hierher oder verwenden Sie „Datei > Öffnen".
+STATUS_LOADING=Player wird geladen...
+STATUS_LOADING_VERSION=Player wird geladen...  [Unity %s -> %s]
+STATUS_INITIALIZING=Player wird initialisiert...
+STATUS_RUNTIME_MISSING_PROMPT=Laufzeitumgebung nicht gefunden - bitte Runtime.zip herunterladen.
+STATUS_RUNTIME_MISSING=Laufzeitumgebung nicht gefunden. Runtime.zip von GitHub herunterladen.
+STATUS_INIT_FAILED=Initialisierung fehlgeschlagen. Runtime\\UnityWebPlayer.exe überprüfen.
+STATUS_CREATE_FAILED=Fehler: Der Unity-Player konnte nicht erstellt werden. Ist Unity Web Player installiert?
+
+# --- Dialog „Öffnen" ---------------------------------------------------------------
+OPEN_TITLE=Öffnen (UFunPlayer)
+OPEN_URL_LABEL=Geben Sie den Netzwerkpfad (URL) einer .unity3d-Datei ein:
+OPEN_URL_EXAMPLE=Beispiel:  http://example.com/game.unity3d
+OPEN_BROWSE_SEPARATOR=--- oder lokale Datei auswählen ---
+OPEN_BROWSE_BTN=&Durchsuchen...
+OPEN_OK_BTN=&OK
+OPEN_CANCEL_BTN=Abbrechen
+OPEN_FILEDLG_TITLE=Unity-Paket öffnen
+OPEN_FILEDLG_FILTER_NAME=Unity-Paket (*.unity3d)
+OPEN_FILEDLG_FILTER_ALL=Alle Dateien
+
+# --- Dialog „Info" ---------------------------------------------------------------
+ABOUT_TITLE=Über UFunPlayer
+ABOUT_TAGLINE=Ein eigenständiger Unity Web Player
+ABOUT_OK_BTN=OK
+
+# --- Dialog „Laufzeitpaket nicht gefunden" ----------------------------------------
+DOWNLOAD_TITLE=Laufzeitpaket nicht gefunden
+DOWNLOAD_NOTFOUND=Die Laufzeitdateien von Unity Web Player wurden nicht gefunden.
+DOWNLOAD_EXPECTED_LABEL=Erwarteter Speicherort:
+DOWNLOAD_BODY=Laden Sie Runtime.zip von GitHub herunter und entpacken Sie sie so, dass Runtime\\mono\\ und Runtime\\player\\ im selben Ordner wie UFunPlayer.exe liegen.
+DOWNLOAD_URL_LABEL=URL:
+DOWNLOAD_OPENPAGE_BTN=&Downloadseite öffnen
+DOWNLOAD_LATER_BTN=&Später erledigen
+DOWNLOAD_CANCEL_BTN=Abbrechen
+
+# --- Warnhinweis zu Werkzeugen ---------------------------------------------------------
+TOOLSWARN_TITLE=Werkzeuge aktivieren – Warnhinweis
+TOOLSWARN_BODY=Werkzeuge sind Programme von Drittanbietern, die Sie selbst hinzufügen. UFunPlayer prüft, isoliert oder verifiziert sie nicht.\n\nLaden Sie Werkzeuge nur aus vertrauenswürdigen Quellen herunter und legen Sie sie im Ordner Tools\\ neben UFunPlayer.exe ab (im selben Ordner wie Runtime\\).\n\nDas Ausführen nicht vertrauenswürdiger Programme kann Ihren Computer beschädigen.
+TOOLSWARN_NOASKAGAIN=Nach Ihrer Zustimmung wird diese Meldung nicht erneut angezeigt.
+TOOLSWARN_ENABLE_BTN=Verstanden, Werkzeuge &aktivieren
+TOOLSWARN_CANCEL_BTN=Abbrechen
+
+# --- Meldungsfenster -----------------------------------------------------------------
+MSG_RUNTIME_SWITCH_FAILED_TITLE=Wechsel der Laufzeitumgebung fehlgeschlagen
+MSG_RUNTIME_SWITCH_FAILED_BODY=Für den Kanal [%s] wurde kein Laufzeitordner gefunden:\n\n  %s\n\nBitte überprüfen Sie Ihr Runtime-Paket.\nz. B. Runtime\\mono\\Beta-5.05.x.x\\
+
+MSG_SAVEPATH_TITLE=Speicherpfad zu lang – Warnung
+MSG_SAVEPATH_BODY=Warnung: Spielstanddaten (PlayerPrefs) funktionieren NICHT!\n\nUnity Web Player kodiert den Dateipfad des Spiels in den Namen der Speicherdatei. Der resultierende Pfad ist %d Zeichen lang und überschreitet damit das Windows-Limit von %d Zeichen. Windows verweigert stillschweigend das Erstellen der Datei.\n\nErwarteter Speicherpfad (%d Zeichen):\n%s\n\nSo beheben Sie das Problem:\n  - Verschieben Sie die Spieldatei in einen kurzen Ordner mit reinen ASCII-Zeichen\n    z. B.  C:\\games\\game.unity3d\n  - Benennen Sie die Datei mit einem kürzeren, rein englischen Namen um\n\nTrotzdem laden (Spielstände werden NICHT gespeichert)?
+
+MSG_LAUNCH_TOOL_TITLE=Werkzeug starten
+MSG_LAUNCH_TOOL_BODY=Start fehlgeschlagen:\n%s
+
+MSG_CLEARDATA_TITLE=Benutzerdaten löschen
+MSG_CLEARDATA_CONFIRM=Dadurch werden Ihr Verlauf der zuletzt verwendeten Dateien gelöscht und der Warnhinweis für Werkzeuge zurückgesetzt (Werkzeuge müssen danach erneut aktiviert werden).\n\nFortfahren?
+MSG_CLEARDATA_DONE=Die Benutzerdaten wurden gelöscht.

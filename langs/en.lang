@@ -1,0 +1,104 @@
+# UFunPlayer language pack — English
+# This file is the master template every other langs\*.lang file is
+# translated from. It mirrors InitDefaultStrings() in UFunPlayer.cpp exactly.
+#
+# Format: KEY=value  (UTF-8, '#' comments, blank lines ignored)
+# Escapes recognized in values: \n = newline, \t = tab, \\ = literal backslash
+# Keep %s / %d placeholders in the SAME COUNT AND ORDER as this file when
+# translating — they are filled in positionally by the program.
+
+LANG_NAME=English
+LANG_CODE=en
+
+# --- Menu bar ---------------------------------------------------------------
+MENU_FILE=&File
+MENU_VIEW=&View
+MENU_CONTROL=&Control
+MENU_TOOLS=&Tools
+MENU_HELP=&Help
+
+# --- File menu ---------------------------------------------------------------
+MENU_FILE_OPEN=&Open...
+MENU_FILE_RELOAD=&Reload
+MENU_FILE_CLOSE=&Close
+MENU_FILE_EXIT=E&xit
+FILE_NO_RECENT=(No recent files)
+
+# --- View menu ---------------------------------------------------------------
+MENU_VIEW_FULLSCREEN=&Fullscreen
+
+# --- Control menu --------------------------------------------------------------
+MENU_CTRL_QUALITY=&Quality
+MENU_CTRL_QUALITY_LOW=&Low
+MENU_CTRL_QUALITY_MED=&Medium
+MENU_CTRL_QUALITY_HIGH=&High
+MENU_CTRL_LANGUAGE=&Language
+LANG_BUILTIN_EN=English (Built-in)
+
+# --- Tools menu ---------------------------------------------------------------
+TOOLS_ENABLE=&Enable Tools
+TOOLS_REFRESH=&Refresh
+TOOLS_EMPTY=(No tools found in Tools\\)
+
+# --- Help menu ---------------------------------------------------------------
+MENU_HELP_REPO=&GitHub Repository
+MENU_HELP_CLEARDATA=Clear User &Data...
+MENU_HELP_ABOUT=&About UFunPlayer...
+
+# --- Status / placeholder text ------------------------------------------------
+STATUS_IDLE=Drag a .unity3d file here, or use File > Open.
+STATUS_LOADING=Loading Player...
+STATUS_LOADING_VERSION=Loading Player...  [Unity %s -> %s]
+STATUS_INITIALIZING=Initializing player...
+STATUS_RUNTIME_MISSING_PROMPT=Runtime not found - please download Runtime.zip.
+STATUS_RUNTIME_MISSING=Runtime not found. Download Runtime.zip from GitHub.
+STATUS_INIT_FAILED=Initialization failed. Check Runtime\\UnityWebPlayer.exe.
+STATUS_CREATE_FAILED=Error: failed to create Unity player. Is Unity Web Player installed?
+
+# --- Open dialog ---------------------------------------------------------------
+OPEN_TITLE=Open (UFunPlayer)
+OPEN_URL_LABEL=Enter the network location (URL) of a .unity3d file:
+OPEN_URL_EXAMPLE=Example:  http://example.com/game.unity3d
+OPEN_BROWSE_SEPARATOR=--- or browse your local files ---
+OPEN_BROWSE_BTN=&Browse...
+OPEN_OK_BTN=&OK
+OPEN_CANCEL_BTN=Cancel
+OPEN_FILEDLG_TITLE=Open Unity Bundle
+OPEN_FILEDLG_FILTER_NAME=Unity Bundle (*.unity3d)
+OPEN_FILEDLG_FILTER_ALL=All Files
+
+# --- About dialog ---------------------------------------------------------------
+ABOUT_TITLE=About UFunPlayer
+ABOUT_TAGLINE=A Standalone Unity Web Player
+ABOUT_OK_BTN=OK
+
+# --- Download / Runtime-not-found dialog ----------------------------------------
+DOWNLOAD_TITLE=Runtime Package Not Found
+DOWNLOAD_NOTFOUND=The Unity Web Player runtime files were not found.
+DOWNLOAD_EXPECTED_LABEL=Expected location:
+DOWNLOAD_BODY=Download Runtime.zip from GitHub and extract it so that Runtime\\mono\\ and Runtime\\player\\ sit next to UFunPlayer.exe.
+DOWNLOAD_URL_LABEL=URL:
+DOWNLOAD_OPENPAGE_BTN=Open &Download Page
+DOWNLOAD_LATER_BTN=I'll do it &later
+DOWNLOAD_CANCEL_BTN=Cancel
+
+# --- Tools warning dialog ---------------------------------------------------------
+TOOLSWARN_TITLE=Enable Tools - Warning
+TOOLSWARN_BODY=Tools are third-party programs that you add yourself. UFunPlayer does not vet, sandbox, or verify them.\n\nOnly download tools from sources you trust, and place them in the Tools\\ folder next to UFunPlayer.exe (the same folder that contains Runtime\\).\n\nRunning an untrusted program can harm your computer.
+TOOLSWARN_NOASKAGAIN=You will not be asked again after agreeing.
+TOOLSWARN_ENABLE_BTN=I Understand, &Enable Tools
+TOOLSWARN_CANCEL_BTN=Cancel
+
+# --- MessageBoxes -----------------------------------------------------------------
+MSG_RUNTIME_SWITCH_FAILED_TITLE=Runtime Switch Failed
+MSG_RUNTIME_SWITCH_FAILED_BODY=Runtime folder not found for [%s]:\n\n  %s\n\nPlease check your Runtime package.\ne.g. Runtime\\mono\\Beta-5.05.x.x\\
+
+MSG_SAVEPATH_TITLE=Save Path Too Long - Warning
+MSG_SAVEPATH_BODY=Warning: Save data (PlayerPrefs) will NOT work!\n\nUnity Web Player encodes the game file path into the save file name. The resulting path is %d characters long, exceeding Windows' %d-character limit. Windows will silently refuse to create the file.\n\nExpected save path (%d chars):\n%s\n\nHow to fix:\n  - Move the game file to a short, all-ASCII folder\n    e.g.  C:\\games\\game.unity3d\n  - Rename the file to a shorter English-only name\n\nLoad anyway (saves will NOT be written)?
+
+MSG_LAUNCH_TOOL_TITLE=Launch Tool
+MSG_LAUNCH_TOOL_BODY=Failed to launch:\n%s
+
+MSG_CLEARDATA_TITLE=Clear User Data
+MSG_CLEARDATA_CONFIRM=This clears your recent-file history and resets the Tools warning prompt (Tools will need to be re-enabled).\n\nContinue?
+MSG_CLEARDATA_DONE=User data has been cleared.

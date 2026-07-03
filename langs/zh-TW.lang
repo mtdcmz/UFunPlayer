@@ -1,0 +1,101 @@
+# UFunPlayer 語言包 — 繁體中文（台灣）
+# 格式：KEY=值（UTF-8 編碼，# 開頭為註解，空行忽略）
+# 逸出字元：\n = 換行，\t = Tab，\\ = 反斜線字面值
+# 翻譯時請保持 %s / %d 佔位符的數量與順序與英文原版完全一致，
+# 因為它們是依位置填入的。
+
+LANG_NAME=繁體中文
+LANG_CODE=zh-TW
+
+# --- 選單列 ---------------------------------------------------------------
+MENU_FILE=檔案(&F)
+MENU_VIEW=檢視(&V)
+MENU_CONTROL=控制(&C)
+MENU_TOOLS=工具(&T)
+MENU_HELP=說明(&H)
+
+# --- 檔案選單 ---------------------------------------------------------------
+MENU_FILE_OPEN=開啟(&O)...
+MENU_FILE_RELOAD=重新載入(&R)
+MENU_FILE_CLOSE=關閉(&C)
+MENU_FILE_EXIT=結束(&X)
+FILE_NO_RECENT=（沒有最近開啟的檔案）
+
+# --- 檢視選單 ---------------------------------------------------------------
+MENU_VIEW_FULLSCREEN=全螢幕(&F)
+
+# --- 控制選單 ---------------------------------------------------------------
+MENU_CTRL_QUALITY=畫質(&Q)
+MENU_CTRL_QUALITY_LOW=低(&L)
+MENU_CTRL_QUALITY_MED=中(&M)
+MENU_CTRL_QUALITY_HIGH=高(&H)
+MENU_CTRL_LANGUAGE=語言(&L)
+LANG_BUILTIN_EN=English（內建）
+
+# --- 工具選單 ---------------------------------------------------------------
+TOOLS_ENABLE=啟用工具(&E)
+TOOLS_REFRESH=重新整理(&R)
+TOOLS_EMPTY=（Tools\\ 資料夾中找不到工具）
+
+# --- 說明選單 ---------------------------------------------------------------
+MENU_HELP_REPO=GitHub 儲存庫(&G)
+MENU_HELP_CLEARDATA=清除使用者資料(&D)...
+MENU_HELP_ABOUT=關於 UFunPlayer(&A)...
+
+# --- 狀態/預留文字 -----------------------------------------------------------
+STATUS_IDLE=將 .unity3d 檔案拖曳到此處，或使用「檔案 > 開啟」。
+STATUS_LOADING=正在載入播放器...
+STATUS_LOADING_VERSION=正在載入播放器...  [Unity %s -> %s]
+STATUS_INITIALIZING=正在初始化播放器...
+STATUS_RUNTIME_MISSING_PROMPT=找不到執行環境 — 請下載 Runtime.zip。
+STATUS_RUNTIME_MISSING=找不到執行環境。請從 GitHub 下載 Runtime.zip。
+STATUS_INIT_FAILED=初始化失敗，請檢查 Runtime\\UnityWebPlayer.exe。
+STATUS_CREATE_FAILED=錯誤：無法建立 Unity 播放器。是否已安裝 Unity Web Player？
+
+# --- 開啟對話方塊 ---------------------------------------------------------------
+OPEN_TITLE=開啟（UFunPlayer）
+OPEN_URL_LABEL=請輸入 .unity3d 檔案的網路位置（URL）：
+OPEN_URL_EXAMPLE=範例：  http://example.com/game.unity3d
+OPEN_BROWSE_SEPARATOR=--- 或瀏覽本機檔案 ---
+OPEN_BROWSE_BTN=瀏覽(&B)...
+OPEN_OK_BTN=確定(&O)
+OPEN_CANCEL_BTN=取消
+OPEN_FILEDLG_TITLE=開啟 Unity 封裝檔
+OPEN_FILEDLG_FILTER_NAME=Unity 封裝檔 (*.unity3d)
+OPEN_FILEDLG_FILTER_ALL=所有檔案
+
+# --- 關於對話方塊 ---------------------------------------------------------------
+ABOUT_TITLE=關於 UFunPlayer
+ABOUT_TAGLINE=獨立版 Unity Web Player
+ABOUT_OK_BTN=確定
+
+# --- 下載／找不到執行環境對話方塊 -------------------------------------------------
+DOWNLOAD_TITLE=找不到執行環境套件
+DOWNLOAD_NOTFOUND=找不到 Unity Web Player 的執行環境檔案。
+DOWNLOAD_EXPECTED_LABEL=預期位置：
+DOWNLOAD_BODY=請從 GitHub 下載 Runtime.zip 並解壓縮，使 Runtime\\mono\\ 及 Runtime\\player\\ 與 UFunPlayer.exe 位於同一個資料夾中。
+DOWNLOAD_URL_LABEL=網址：
+DOWNLOAD_OPENPAGE_BTN=開啟下載頁面(&D)
+DOWNLOAD_LATER_BTN=稍後再說(&L)
+DOWNLOAD_CANCEL_BTN=取消
+
+# --- 工具警告對話方塊 -------------------------------------------------------------
+TOOLSWARN_TITLE=啟用工具 - 警告
+TOOLSWARN_BODY=「工具」是您自行加入的第三方程式，UFunPlayer 不會對其進行審查、沙盒隔離或驗證。\n\n請僅從您信任的來源下載工具，並將其放入 UFunPlayer.exe 同層的 Tools\\ 資料夾中（與 Runtime\\ 資料夾同層）。\n\n執行不受信任的程式可能會損害您的電腦。
+TOOLSWARN_NOASKAGAIN=同意後將不會再顯示此警告。
+TOOLSWARN_ENABLE_BTN=我已了解，啟用工具(&E)
+TOOLSWARN_CANCEL_BTN=取消
+
+# --- 訊息方塊 -----------------------------------------------------------------------
+MSG_RUNTIME_SWITCH_FAILED_TITLE=執行環境切換失敗
+MSG_RUNTIME_SWITCH_FAILED_BODY=找不到頻道 [%s] 對應的執行環境資料夾：\n\n  %s\n\n請檢查您的 Runtime 套件。\n例如：Runtime\\mono\\Beta-5.05.x.x\\
+
+MSG_SAVEPATH_TITLE=存檔路徑過長 - 警告
+MSG_SAVEPATH_BODY=警告：存檔資料（PlayerPrefs）將無法正常運作！\n\nUnity Web Player 會將遊戲檔案路徑編碼進存檔檔名中。產生的路徑長度為 %d 個字元，超過 Windows 的 %d 字元限制，Windows 會靜默拒絕建立該檔案。\n\n預期存檔路徑（%d 個字元）：\n%s\n\n解決方式：\n  - 將遊戲檔案移動到路徑較短的純英文資料夾中\n    例如：C:\\games\\game.unity3d\n  - 將檔案重新命名為較短的純英文名稱\n\n是否仍要繼續載入（存檔將無法寫入）？
+
+MSG_LAUNCH_TOOL_TITLE=啟動工具
+MSG_LAUNCH_TOOL_BODY=啟動失敗：\n%s
+
+MSG_CLEARDATA_TITLE=清除使用者資料
+MSG_CLEARDATA_CONFIRM=這將清除您的最近開啟記錄，並重設「啟用工具」警告提示的狀態（之後需要重新同意才能啟用工具）。\n\n是否繼續？
+MSG_CLEARDATA_DONE=使用者資料已清除。

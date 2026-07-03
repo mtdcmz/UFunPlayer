@@ -1,0 +1,102 @@
+# Paquete de idioma de UFunPlayer — Español
+# Formato: CLAVE=valor (codificación UTF-8, las líneas con '#' son
+# comentarios, las líneas en blanco se ignoran).
+# Escapes: \n = salto de línea, \t = tabulador, \\ = barra invertida literal.
+# Al traducir, conserve la MISMA CANTIDAD Y ORDEN de los marcadores
+# %s / %d que en el original — se insertan según su posición.
+
+LANG_NAME=Español
+LANG_CODE=es
+
+# --- Barra de menús ---------------------------------------------------------------
+MENU_FILE=&Archivo
+MENU_VIEW=&Ver
+MENU_CONTROL=&Control
+MENU_TOOLS=&Herramientas
+MENU_HELP=Ay&uda
+
+# --- Menú Archivo ---------------------------------------------------------------
+MENU_FILE_OPEN=&Abrir...
+MENU_FILE_RELOAD=&Recargar
+MENU_FILE_CLOSE=&Cerrar
+MENU_FILE_EXIT=&Salir
+FILE_NO_RECENT=(Sin archivos recientes)
+
+# --- Menú Ver ---------------------------------------------------------------
+MENU_VIEW_FULLSCREEN=Pantalla &completa
+
+# --- Menú Control ---------------------------------------------------------------
+MENU_CTRL_QUALITY=&Calidad
+MENU_CTRL_QUALITY_LOW=&Baja
+MENU_CTRL_QUALITY_MED=&Media
+MENU_CTRL_QUALITY_HIGH=&Alta
+MENU_CTRL_LANGUAGE=&Idioma
+LANG_BUILTIN_EN=English (integrado)
+
+# --- Menú Herramientas ---------------------------------------------------------------
+TOOLS_ENABLE=&Activar herramientas
+TOOLS_REFRESH=&Actualizar
+TOOLS_EMPTY=(No se encontraron herramientas en Tools\\)
+
+# --- Menú Ayuda ---------------------------------------------------------------
+MENU_HELP_REPO=Repositorio de &GitHub
+MENU_HELP_CLEARDATA=Borrar &datos de usuario...
+MENU_HELP_ABOUT=&Acerca de UFunPlayer...
+
+# --- Texto de estado / marcador de posición -----------------------------------------------------------
+STATUS_IDLE=Arrastre un archivo .unity3d aquí, o use Archivo > Abrir.
+STATUS_LOADING=Cargando reproductor...
+STATUS_LOADING_VERSION=Cargando reproductor...  [Unity %s -> %s]
+STATUS_INITIALIZING=Inicializando reproductor...
+STATUS_RUNTIME_MISSING_PROMPT=No se encontró el runtime - descargue Runtime.zip.
+STATUS_RUNTIME_MISSING=No se encontró el runtime. Descargue Runtime.zip desde GitHub.
+STATUS_INIT_FAILED=Error de inicialización. Verifique Runtime\\UnityWebPlayer.exe.
+STATUS_CREATE_FAILED=Error: no se pudo crear el reproductor de Unity. ¿Está instalado Unity Web Player?
+
+# --- Cuadro de diálogo Abrir ---------------------------------------------------------------
+OPEN_TITLE=Abrir (UFunPlayer)
+OPEN_URL_LABEL=Introduzca la ubicación de red (URL) de un archivo .unity3d:
+OPEN_URL_EXAMPLE=Ejemplo:  http://example.com/game.unity3d
+OPEN_BROWSE_SEPARATOR=--- o busque un archivo local ---
+OPEN_BROWSE_BTN=&Examinar...
+OPEN_OK_BTN=&Aceptar
+OPEN_CANCEL_BTN=Cancelar
+OPEN_FILEDLG_TITLE=Abrir paquete de Unity
+OPEN_FILEDLG_FILTER_NAME=Paquete de Unity (*.unity3d)
+OPEN_FILEDLG_FILTER_ALL=Todos los archivos
+
+# --- Cuadro de diálogo Acerca de ---------------------------------------------------------------
+ABOUT_TITLE=Acerca de UFunPlayer
+ABOUT_TAGLINE=Un reproductor Unity Web Player independiente
+ABOUT_OK_BTN=Aceptar
+
+# --- Cuadro de diálogo de paquete Runtime no encontrado ----------------------------------------
+DOWNLOAD_TITLE=Paquete Runtime no encontrado
+DOWNLOAD_NOTFOUND=No se encontraron los archivos de Runtime de Unity Web Player.
+DOWNLOAD_EXPECTED_LABEL=Ubicación esperada:
+DOWNLOAD_BODY=Descargue Runtime.zip desde GitHub y extráigalo de forma que Runtime\\mono\\ y Runtime\\player\\ queden en la misma carpeta que UFunPlayer.exe.
+DOWNLOAD_URL_LABEL=URL:
+DOWNLOAD_OPENPAGE_BTN=Abrir página de &descarga
+DOWNLOAD_LATER_BTN=Lo haré más &tarde
+DOWNLOAD_CANCEL_BTN=Cancelar
+
+# --- Advertencia al activar herramientas ---------------------------------------------------------
+TOOLSWARN_TITLE=Activar herramientas - Advertencia
+TOOLSWARN_BODY=Las herramientas son programas de terceros que usted mismo agrega. UFunPlayer no las examina, aísla ni verifica.\n\nDescargue herramientas únicamente de fuentes de confianza y colóquelas en la carpeta Tools\\ junto a UFunPlayer.exe (la misma carpeta que contiene Runtime\\).\n\nEjecutar un programa que no es de confianza puede dañar su equipo.
+TOOLSWARN_NOASKAGAIN=No se le volverá a preguntar después de aceptar.
+TOOLSWARN_ENABLE_BTN=Entiendo, &activar herramientas
+TOOLSWARN_CANCEL_BTN=Cancelar
+
+# --- Cuadros de mensaje -----------------------------------------------------------------
+MSG_RUNTIME_SWITCH_FAILED_TITLE=Error al cambiar el runtime
+MSG_RUNTIME_SWITCH_FAILED_BODY=No se encontró la carpeta de runtime para el canal [%s]:\n\n  %s\n\nRevise su paquete Runtime.\np. ej. Runtime\\mono\\Beta-5.05.x.x\\
+
+MSG_SAVEPATH_TITLE=Ruta de guardado demasiado larga - Advertencia
+MSG_SAVEPATH_BODY=Advertencia: ¡los datos guardados (PlayerPrefs) NO funcionarán!\n\nUnity Web Player codifica la ruta del archivo del juego en el nombre del archivo de guardado. La ruta resultante tiene %d caracteres, superando el límite de %d caracteres de Windows. Windows se negará silenciosamente a crear el archivo.\n\nRuta de guardado esperada (%d caracteres):\n%s\n\nCómo solucionarlo:\n  - Mueva el archivo del juego a una carpeta corta y solo con caracteres ASCII\n    p. ej.  C:\\games\\game.unity3d\n  - Cambie el nombre del archivo a uno más corto y solo en inglés\n\n¿Cargar de todos modos (los datos NO se guardarán)?
+
+MSG_LAUNCH_TOOL_TITLE=Iniciar herramienta
+MSG_LAUNCH_TOOL_BODY=No se pudo iniciar:\n%s
+
+MSG_CLEARDATA_TITLE=Borrar datos de usuario
+MSG_CLEARDATA_CONFIRM=Esto borrará su historial de archivos recientes y restablecerá el aviso de advertencia de herramientas (deberá volver a activarlas).\n\n¿Continuar?
+MSG_CLEARDATA_DONE=Los datos de usuario se han borrado.

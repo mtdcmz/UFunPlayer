@@ -1,0 +1,103 @@
+# Pack de langue UFunPlayer — Français
+# Format : CLÉ=valeur (encodage UTF-8, les lignes commençant par '#' sont
+# des commentaires, les lignes vides sont ignorées).
+# Échappements : \n = saut de ligne, \t = tabulation, \\ = barre oblique
+# inverse littérale.
+# Lors de la traduction, conservez le MÊME NOMBRE ET ORDRE des espaces
+# réservés %s / %d que dans l'original — ils sont insérés par position.
+
+LANG_NAME=Français
+LANG_CODE=fr
+
+# --- Barre de menus ---------------------------------------------------------------
+MENU_FILE=&Fichier
+MENU_VIEW=&Affichage
+MENU_CONTROL=&Contrôle
+MENU_TOOLS=&Outils
+MENU_HELP=&Aide
+
+# --- Menu Fichier ---------------------------------------------------------------
+MENU_FILE_OPEN=&Ouvrir...
+MENU_FILE_RELOAD=&Recharger
+MENU_FILE_CLOSE=&Fermer
+MENU_FILE_EXIT=&Quitter
+FILE_NO_RECENT=(Aucun fichier récent)
+
+# --- Menu Affichage ---------------------------------------------------------------
+MENU_VIEW_FULLSCREEN=Plein &écran
+
+# --- Menu Contrôle ---------------------------------------------------------------
+MENU_CTRL_QUALITY=&Qualité
+MENU_CTRL_QUALITY_LOW=&Faible
+MENU_CTRL_QUALITY_MED=&Moyenne
+MENU_CTRL_QUALITY_HIGH=Éle&vée
+MENU_CTRL_LANGUAGE=&Langue
+LANG_BUILTIN_EN=English (intégré)
+
+# --- Menu Outils ---------------------------------------------------------------
+TOOLS_ENABLE=&Activer les outils
+TOOLS_REFRESH=&Actualiser
+TOOLS_EMPTY=(Aucun outil trouvé dans Tools\\)
+
+# --- Menu Aide ---------------------------------------------------------------
+MENU_HELP_REPO=Dépôt &GitHub
+MENU_HELP_CLEARDATA=Effacer les &données utilisateur...
+MENU_HELP_ABOUT=À &propos d'UFunPlayer...
+
+# --- Texte d'état / espace réservé -----------------------------------------------------------
+STATUS_IDLE=Glissez un fichier .unity3d ici, ou utilisez Fichier > Ouvrir.
+STATUS_LOADING=Chargement du lecteur...
+STATUS_LOADING_VERSION=Chargement du lecteur...  [Unity %s -> %s]
+STATUS_INITIALIZING=Initialisation du lecteur...
+STATUS_RUNTIME_MISSING_PROMPT=Runtime introuvable - veuillez télécharger Runtime.zip.
+STATUS_RUNTIME_MISSING=Runtime introuvable. Téléchargez Runtime.zip depuis GitHub.
+STATUS_INIT_FAILED=Échec de l'initialisation. Vérifiez Runtime\\UnityWebPlayer.exe.
+STATUS_CREATE_FAILED=Erreur : impossible de créer le lecteur Unity. Unity Web Player est-il installé ?
+
+# --- Boîte de dialogue Ouvrir ---------------------------------------------------------------
+OPEN_TITLE=Ouvrir (UFunPlayer)
+OPEN_URL_LABEL=Saisissez l'emplacement réseau (URL) d'un fichier .unity3d :
+OPEN_URL_EXAMPLE=Exemple :  http://example.com/game.unity3d
+OPEN_BROWSE_SEPARATOR=--- ou parcourez vos fichiers locaux ---
+OPEN_BROWSE_BTN=&Parcourir...
+OPEN_OK_BTN=&OK
+OPEN_CANCEL_BTN=Annuler
+OPEN_FILEDLG_TITLE=Ouvrir un pack Unity
+OPEN_FILEDLG_FILTER_NAME=Pack Unity (*.unity3d)
+OPEN_FILEDLG_FILTER_ALL=Tous les fichiers
+
+# --- Boîte de dialogue À propos ---------------------------------------------------------------
+ABOUT_TITLE=À propos d'UFunPlayer
+ABOUT_TAGLINE=Un lecteur Unity Web Player autonome
+ABOUT_OK_BTN=OK
+
+# --- Boîte de dialogue Package Runtime introuvable ----------------------------------------
+DOWNLOAD_TITLE=Package Runtime introuvable
+DOWNLOAD_NOTFOUND=Les fichiers Runtime de Unity Web Player sont introuvables.
+DOWNLOAD_EXPECTED_LABEL=Emplacement attendu :
+DOWNLOAD_BODY=Téléchargez Runtime.zip depuis GitHub et extrayez-le de sorte que Runtime\\mono\\ et Runtime\\player\\ se trouvent dans le même dossier qu'UFunPlayer.exe.
+DOWNLOAD_URL_LABEL=URL :
+DOWNLOAD_OPENPAGE_BTN=Ouvrir la page de &téléchargement
+DOWNLOAD_LATER_BTN=Je le ferai plus &tard
+DOWNLOAD_CANCEL_BTN=Annuler
+
+# --- Avertissement d'activation des outils ---------------------------------------------------------
+TOOLSWARN_TITLE=Activer les outils - Avertissement
+TOOLSWARN_BODY=Les outils sont des programmes tiers que vous ajoutez vous-même. UFunPlayer ne les vérifie pas, ne les isole pas et ne les valide pas.\n\nNe téléchargez des outils que depuis des sources en qui vous avez confiance, et placez-les dans le dossier Tools\\ situé à côté d'UFunPlayer.exe (le même dossier que Runtime\\).\n\nL'exécution d'un programme non fiable peut endommager votre ordinateur.
+TOOLSWARN_NOASKAGAIN=Vous ne serez plus averti après avoir accepté.
+TOOLSWARN_ENABLE_BTN=J'ai compris, &activer les outils
+TOOLSWARN_CANCEL_BTN=Annuler
+
+# --- Boîtes de message -----------------------------------------------------------------
+MSG_RUNTIME_SWITCH_FAILED_TITLE=Échec du changement de Runtime
+MSG_RUNTIME_SWITCH_FAILED_BODY=Dossier Runtime introuvable pour le canal [%s] :\n\n  %s\n\nVeuillez vérifier votre package Runtime.\nex. Runtime\\mono\\Beta-5.05.x.x\\
+
+MSG_SAVEPATH_TITLE=Chemin de sauvegarde trop long - Avertissement
+MSG_SAVEPATH_BODY=Avertissement : les données de sauvegarde (PlayerPrefs) ne fonctionneront PAS !\n\nUnity Web Player encode le chemin du fichier du jeu dans le nom du fichier de sauvegarde. Le chemin obtenu comporte %d caractères, ce qui dépasse la limite de %d caractères de Windows. Windows refusera silencieusement de créer ce fichier.\n\nChemin de sauvegarde attendu (%d caractères) :\n%s\n\nComment y remédier :\n  - Déplacez le fichier du jeu dans un dossier court, en caractères ASCII uniquement\n    ex.  C:\\games\\game.unity3d\n  - Renommez le fichier avec un nom plus court, en anglais uniquement\n\nCharger quand même (les sauvegardes ne seront PAS écrites) ?
+
+MSG_LAUNCH_TOOL_TITLE=Lancement de l'outil
+MSG_LAUNCH_TOOL_BODY=Échec du lancement :\n%s
+
+MSG_CLEARDATA_TITLE=Effacer les données utilisateur
+MSG_CLEARDATA_CONFIRM=Cela effacera l'historique de vos fichiers récents et réinitialisera l'avertissement d'activation des outils (les outils devront être réactivés).\n\nContinuer ?
+MSG_CLEARDATA_DONE=Les données utilisateur ont été effacées.

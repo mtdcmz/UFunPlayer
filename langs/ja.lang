@@ -1,0 +1,100 @@
+# UFunPlayer 言語パック — 日本語
+# 形式：KEY=値（UTF-8 エンコード、# で始まる行はコメント、空行は無視されます）
+# エスケープ：\n = 改行、\t = タブ、\\ = バックスラッシュそのもの
+# 翻訳する際は、%s / %d のプレースホルダーの数と順序を英語版と
+# 完全に一致させてください（プログラム側で位置に基づいて埋め込まれます）。
+
+LANG_NAME=日本語
+LANG_CODE=ja
+
+# --- メニューバー ---------------------------------------------------------------
+MENU_FILE=ファイル(&F)
+MENU_VIEW=表示(&V)
+MENU_CONTROL=コントロール(&C)
+MENU_TOOLS=ツール(&T)
+MENU_HELP=ヘルプ(&H)
+
+# --- ファイルメニュー ---------------------------------------------------------------
+MENU_FILE_OPEN=開く(&O)...
+MENU_FILE_RELOAD=再読み込み(&R)
+MENU_FILE_CLOSE=閉じる(&C)
+MENU_FILE_EXIT=終了(&X)
+FILE_NO_RECENT=（最近使用したファイルはありません）
+
+# --- 表示メニュー ---------------------------------------------------------------
+MENU_VIEW_FULLSCREEN=フルスクリーン(&F)
+
+# --- コントロールメニュー ---------------------------------------------------------------
+MENU_CTRL_QUALITY=画質(&Q)
+MENU_CTRL_QUALITY_LOW=低(&L)
+MENU_CTRL_QUALITY_MED=中(&M)
+MENU_CTRL_QUALITY_HIGH=高(&H)
+MENU_CTRL_LANGUAGE=言語(&L)
+LANG_BUILTIN_EN=English（内蔵）
+
+# --- ツールメニュー ---------------------------------------------------------------
+TOOLS_ENABLE=ツールを有効にする(&E)
+TOOLS_REFRESH=更新(&R)
+TOOLS_EMPTY=（Tools\\ フォルダーにツールが見つかりません）
+
+# --- ヘルプメニュー ---------------------------------------------------------------
+MENU_HELP_REPO=GitHub リポジトリ(&G)
+MENU_HELP_CLEARDATA=ユーザーデータの消去(&D)...
+MENU_HELP_ABOUT=UFunPlayer について(&A)...
+
+# --- ステータス / プレースホルダーテキスト -----------------------------------------------------------
+STATUS_IDLE=.unity3d ファイルをここにドラッグするか、「ファイル > 開く」を使用してください。
+STATUS_LOADING=プレイヤーを読み込み中...
+STATUS_LOADING_VERSION=プレイヤーを読み込み中...  [Unity %s -> %s]
+STATUS_INITIALIZING=プレイヤーを初期化中...
+STATUS_RUNTIME_MISSING_PROMPT=ランタイムが見つかりません。Runtime.zip をダウンロードしてください。
+STATUS_RUNTIME_MISSING=ランタイムが見つかりません。GitHub から Runtime.zip をダウンロードしてください。
+STATUS_INIT_FAILED=初期化に失敗しました。Runtime\\UnityWebPlayer.exe を確認してください。
+STATUS_CREATE_FAILED=エラー：Unity プレイヤーを作成できませんでした。Unity Web Player はインストールされていますか？
+
+# --- 開くダイアログ ---------------------------------------------------------------
+OPEN_TITLE=開く（UFunPlayer）
+OPEN_URL_LABEL=.unity3d ファイルのネットワーク上の場所（URL）を入力してください：
+OPEN_URL_EXAMPLE=例：  http://example.com/game.unity3d
+OPEN_BROWSE_SEPARATOR=--- またはローカルファイルを参照 ---
+OPEN_BROWSE_BTN=参照(&B)...
+OPEN_OK_BTN=OK(&O)
+OPEN_CANCEL_BTN=キャンセル
+OPEN_FILEDLG_TITLE=Unity バンドルを開く
+OPEN_FILEDLG_FILTER_NAME=Unity バンドル (*.unity3d)
+OPEN_FILEDLG_FILTER_ALL=すべてのファイル
+
+# --- バージョン情報ダイアログ ---------------------------------------------------------------
+ABOUT_TITLE=UFunPlayer について
+ABOUT_TAGLINE=スタンドアロン版 Unity Web Player
+ABOUT_OK_BTN=OK
+
+# --- ダウンロード / ランタイム未検出ダイアログ ----------------------------------------
+DOWNLOAD_TITLE=ランタイムパッケージが見つかりません
+DOWNLOAD_NOTFOUND=Unity Web Player のランタイムファイルが見つかりませんでした。
+DOWNLOAD_EXPECTED_LABEL=想定される場所：
+DOWNLOAD_BODY=GitHub から Runtime.zip をダウンロードし、Runtime\\mono\\ と Runtime\\player\\ が UFunPlayer.exe と同じフォルダーに入るように展開してください。
+DOWNLOAD_URL_LABEL=URL：
+DOWNLOAD_OPENPAGE_BTN=ダウンロードページを開く(&D)
+DOWNLOAD_LATER_BTN=後で行う(&L)
+DOWNLOAD_CANCEL_BTN=キャンセル
+
+# --- ツール有効化の警告ダイアログ ---------------------------------------------------------
+TOOLSWARN_TITLE=ツールの有効化 - 警告
+TOOLSWARN_BODY=「ツール」はユーザー自身が追加するサードパーティ製プログラムです。UFunPlayer はこれらを検証、サンドボックス化、または確認することはありません。\n\n信頼できる提供元からのみツールをダウンロードし、UFunPlayer.exe と同じフォルダー（Runtime\\ フォルダーがあるのと同じ場所）にある Tools\\ フォルダーに配置してください。\n\n信頼できないプログラムを実行すると、コンピューターに損害を与える可能性があります。
+TOOLSWARN_NOASKAGAIN=同意すると、以降この警告は表示されません。
+TOOLSWARN_ENABLE_BTN=理解しました。ツールを有効にする(&E)
+TOOLSWARN_CANCEL_BTN=キャンセル
+
+# --- メッセージボックス -----------------------------------------------------------------
+MSG_RUNTIME_SWITCH_FAILED_TITLE=ランタイムの切り替えに失敗しました
+MSG_RUNTIME_SWITCH_FAILED_BODY=チャンネル [%s] に対応するランタイムフォルダーが見つかりません：\n\n  %s\n\nRuntime パッケージを確認してください。\n例：Runtime\\mono\\Beta-5.05.x.x\\
+
+MSG_SAVEPATH_TITLE=セーブパスが長すぎます - 警告
+MSG_SAVEPATH_BODY=警告：セーブデータ（PlayerPrefs）は正常に動作しません！\n\nUnity Web Player は、ゲームファイルのパスをセーブファイル名にエンコードします。生成されたパスは %d 文字で、Windows の %d 文字制限を超えています。Windows はファイルの作成を黙って拒否します。\n\n想定されるセーブパス（%d 文字）：\n%s\n\n対処方法：\n  - ゲームファイルを短い半角英数字のみのフォルダーに移動する\n    例：C:\\games\\game.unity3d\n  - ファイル名を短い半角英数字のみの名前に変更する\n\nこのまま読み込みますか？（セーブデータは書き込まれません）
+MSG_LAUNCH_TOOL_TITLE=ツールの起動
+MSG_LAUNCH_TOOL_BODY=起動に失敗しました：\n%s
+
+MSG_CLEARDATA_TITLE=ユーザーデータの消去
+MSG_CLEARDATA_CONFIRM=最近使用したファイルの履歴が消去され、「ツールを有効にする」警告の表示状態もリセットされます（ツールを使用するには再度同意が必要になります）。\n\n続行しますか？
+MSG_CLEARDATA_DONE=ユーザーデータを消去しました。
