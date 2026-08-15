@@ -18,7 +18,7 @@ UFunPlayer can launch external tools (e.g., decompilers, asset extractors, or cu
 - Place any `.exe` files you want to use inside a `Tools` folder next to `UFunPlayer.exe`.
 - By default the Tools menu is hidden. To enable it, go to **Tools → Enable Tools** and confirm the warning dialog.
 - Once enabled, the menu will show a **Refresh** button and list all `.exe` files found in the `Tools` folder.
-- Click any tool name to launch it. The tool’s working directory is set to the folder containing the `.exe`.
+- Click any tool name to launch it. The tool's working directory is set to the folder containing the `.exe`.
 - Tools are loaded on startup if previously enabled; you can refresh the list at any time.
 
 > **Note:** Enabling the Tools feature allows arbitrary executables to be run. Only place trusted tools in the `Tools` folder.
@@ -33,7 +33,7 @@ Unity Web Player saves game data (PlayerPrefs) by encoding the **full path** of
 the `.unity3d` file into the save file name.  
 
 If that path is very long, or contains many non‑ASCII characters (e.g. Chinese),
-the resulting save path can exceed Windows’ 260‑character `MAX_PATH` limit.  
+the resulting save path can exceed Windows' 260‑character `MAX_PATH` limit.  
 When that happens, **saves are silently lost** — the file is simply never written.
 
 ### How to keep saves working
@@ -47,6 +47,28 @@ UFunPlayer will warn you on open if it detects that the save path is too long.
 ## Clearing User Data
 
 The **Help → Clear User Data** menu item resets your recent‑file history and disables the Tools feature (you will need to re‑enable it via the menu). This is useful for privacy or troubleshooting.
+
+## URL Spoofing
+
+Some game CDNs reject `.unity3d` downloads unless the request carries a valid `Referer` from the host site. UFunPlayer can fake that header so blocked games still load.
+
+Enter both the game URL and the referer URL in **File → Open**, then click **OK**. The file is downloaded with the spoofed referer and loaded locally. URL Spoofing only applies to remote URLs.
+
+When spoofing is active, the downloaded file is cached under `%APPDATA%\UFunPlayer\cache\<hash>.unity3d` for the session and deleted on close or exit. Saves persist across sessions.
+
+## Browser Integration (unitywp:// Protocol)
+
+UFunPlayer registers the `unitywp://` protocol on startup so Chromium‑based browsers can launch it directly from a game page.
+
+**URL format:**
+
+```
+unitywp://<gameURL>|<refererURL>
+```
+
+The `|` separator (URL‑encoded as `%7C` by browsers) is decoded by UFunPlayer. The referer part is optional.
+
+A companion browser extension automates this on supported game pages. Source code: [mtdcmz/UFPLoader](https://github.com/mtdcmz/UFPLoader/).
 
 ## License
 
