@@ -130,6 +130,7 @@ static void UnityDestroy();
 static bool UnityCreate(HWND,const wchar_t*);
 static void UnityResize(int,int);
 static void LoadFileOrUrl(const wchar_t*,const wchar_t*refererArg=nullptr);
+static void ParseCmdArg(const wchar_t* arg,wchar_t* outGame,size_t gameCap,wchar_t* outRef,size_t refCap);
 static void ReloadGame();
 static void CloseGame();
 static const wchar_t* GetCachePath(const wchar_t* url);
@@ -1551,6 +1552,17 @@ LRESULT CALLBACK MainWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
     case WM_LOADFILE:{
         wchar_t*p=reinterpret_cast<wchar_t*>(lp);if(p){LoadFileOrUrl(p);delete[]p;}return 0;}
 
+    case WM_COPYDATA:{
+        // Second instance forwarded its command line so we load it here.
+        COPYDATASTRUCT*cds=reinterpret_cast<COPYDATASTRUCT*>(lp);
+        if(cds&&cds->dwData==0x55465031&&cds->cbData>=sizeof(wchar_t)&&cds->lpData){
+            const wchar_t*arg=reinterpret_cast<const wchar_t*>(cds->lpData);
+            wchar_t game[MAX_PATH*2]={},ref[MAX_PATH*2]={};
+            ParseCmdArg(arg,game,_countof(game),ref,_countof(ref));
+            if(game[0])LoadFileOrUrl(game,ref[0]?ref:nullptr);
+        }
+        return 0;}
+
     case WM_INITMENUPOPUP:{
         HMENU hFile=GetSubMenu(GetMenu(hwnd),0);
         HMENU hCtrl=GetSubMenu(GetMenu(hwnd),2);
@@ -1741,13 +1753,23 @@ int WINAPI wWinMain(HINSTANCE hInst,HINSTANCE,LPWSTR,int nShow){
 
     // Single-instance lock: different instances loading different Unity
     // versions would clobber the shared runtime switch. Instead of nagging,
-    // silently bring the existing window to the foreground and exit.
+    // silently bring the existing window to the foreground and forward the
+    // command line so the existing instance loads the requested game.
     g_hSingleInstance = CreateMutexW(nullptr, TRUE, L"Global\\UFunPlayerSingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         HWND existing = FindWindowW(L"UFunPlayerWnd", nullptr);
         if (existing) {
             if (IsIconic(existing)) ShowWindow(existing, SW_RESTORE);
             SetForegroundWindow(existing);
+            // Forward command line to existing instance via WM_COPYDATA.
+            if (__argc >= 2 && __wargv[1][0]) {
+                size_t len = wcslen(__wargv[1]) + 1;
+                COPYDATASTRUCT cds = {};
+                cds.dwData = 0x55465031;  // "UFP1"
+                cds.cbData = (DWORD)(len * sizeof(wchar_t));
+                cds.lpData = (PVOID)__wargv[1];
+                SendMessageW(existing, WM_COPYDATA, (WPARAM)nullptr, (LPARAM)&cds);
+            }
         }
         if (g_hSingleInstance) { CloseHandle(g_hSingleInstance); g_hSingleInstance = nullptr; }
         return 0;
