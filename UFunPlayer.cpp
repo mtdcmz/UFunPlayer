@@ -21,6 +21,7 @@
 #include <oaidl.h>
 #include <winreg.h>
 #include <wininet.h>
+#include <urlmon.h>
 #include <stdio.h>
 #include <string.h>
 #include <wchar.h>
@@ -32,7 +33,7 @@
 //  Constants
 // ---------------------------------------------------------------------------
 #define APP_NAME       L"UFunPlayer"
-#define APP_VERSION    L"1.2p"
+#define APP_VERSION    L"1.3"
 #define GITHUB_URL     L"https://github.com/mtdcmz/UFunPlayer"
 #define RUNTIME_DL_URL L"https://github.com/mtdcmz/UFunPlayer/releases/latest/download/Runtime.zip"
 
@@ -90,9 +91,15 @@ static wchar_t g_currentPath[MAX_PATH * 2] = {};
 static wchar_t g_statusText[160] = L"Drag a .unity3d file here, or use File > Open.";
 static wchar_t g_exeDir[MAX_PATH] = {};
 static wchar_t g_pendingFile[MAX_PATH * 2] = {};
+static wchar_t g_pendingReferer[MAX_PATH * 2] = {};   // referer from cmdline/Open dialog
+static wchar_t g_currentReferer[MAX_PATH * 2] = {};   // referer for the loaded game
+static wchar_t g_currentCacheFile[MAX_PATH]    = {};   // our cache copy of the loaded .unity3d (empty if local/no-referer)
+static HANDLE  g_hSingleInstance = nullptr;            // mutex preventing multiple launches
 
 // MRU list
 static wchar_t g_mruList[MRU_MAX][MAX_PATH * 2];
+static wchar_t g_mruReferer[MRU_MAX][MAX_PATH * 2];
+static wchar_t g_mruRealSrc[MRU_MAX][MAX_PATH * 2]; // 实际传给Unity的路径(带referer时为缓存路径)
 static int     g_mruCount = 0;
 
 // Tools menu state
@@ -122,9 +129,12 @@ INT_PTR CALLBACK ToolsWarningDlgProc(HWND,UINT,WPARAM,LPARAM);
 static void UnityDestroy();
 static bool UnityCreate(HWND,const wchar_t*);
 static void UnityResize(int,int);
-static void LoadFileOrUrl(const wchar_t*);
+static void LoadFileOrUrl(const wchar_t*,const wchar_t*refererArg=nullptr);
 static void ReloadGame();
 static void CloseGame();
+static const wchar_t* GetCachePath(const wchar_t* url);
+static bool DownloadToCustomCache(const wchar_t* url,const wchar_t* referer,wchar_t* outPath,size_t outCap);
+static void PurgeCacheDir();
 static void SetStatus(const wchar_t*);
 static void ToggleFullscreen();
 static void RebuildFileMenu();
@@ -170,6 +180,79 @@ public:
     STDMETHODIMP EnableModeless(BOOL)                    override { return S_OK; }
     STDMETHODIMP TranslateAccelerator(LPMSG,WORD)        override { return E_NOTIMPL; }
 };
+
+// ---------------------------------------------------------------------------
+//  Referer injection via URL Moniker binding
+//
+//  Unity Web Player ActiveX downloads its src URL through the URL Moniker
+//  binding layer (URLDownloadToCacheFile / IMoniker::BindToStorage), which
+//  queries the container's IServiceProvider for SID_SBindHost -> IBindHost.
+//  We implement IBindHost by wrapping every bind context with our own
+//  IBindStatusCallback + IHttpNegotiate, whose BeginningTransaction() injects
+//  the Referer header. This mirrors what Trident does for <object> in a real
+//  browser: the host supplies the referer, not the control.
+//
+//  g_currentReferer is read at bind time; set it before UnityCreate().
+//  Empty referer -> no injection, control behaves as before.
+// ---------------------------------------------------------------------------
+class UnityBindCallback : public IBindStatusCallback, public IHttpNegotiate {
+public:
+    LONG m_refs;
+    wchar_t m_referer[MAX_PATH * 2];
+    IBindStatusCallback* m_inner;   // original callback in the bind ctx (may be null)
+
+    UnityBindCallback(const wchar_t* referer, IBindStatusCallback* inner)
+        : m_refs(1), m_inner(inner) {
+        m_referer[0] = L'\0';
+        if (referer) { wcsncpy(m_referer, referer, (sizeof(m_referer)/sizeof(wchar_t))-1);
+                       m_referer[(sizeof(m_referer)/sizeof(wchar_t))-1] = L'\0'; }
+        if (m_inner) m_inner->AddRef();
+    }
+    ~UnityBindCallback(){ if (m_inner) m_inner->Release(); }
+
+    // IUnknown
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
+        if (riid==IID_IUnknown || riid==IID_IBindStatusCallback) *ppv=static_cast<IBindStatusCallback*>(this);
+        else if (riid==IID_IHttpNegotiate) *ppv=static_cast<IHttpNegotiate*>(this);
+        else { *ppv=nullptr; return E_NOINTERFACE; }
+        AddRef(); return S_OK;
+    }
+    STDMETHODIMP_(ULONG) AddRef()  override { return InterlockedIncrement(&m_refs); }
+    STDMETHODIMP_(ULONG) Release() override {
+        LONG r=InterlockedDecrement(&m_refs); if(r==0) delete this; return (ULONG)r;
+    }
+
+    // IBindStatusCallback - forward everything to inner, we only exist for IHttpNegotiate
+    STDMETHODIMP OnStartBinding(DWORD r, IBinding* b) override { return m_inner?m_inner->OnStartBinding(r,b):S_OK; }
+    STDMETHODIMP GetPriority(LONG* p) override { return m_inner?m_inner->GetPriority(p):E_NOTIMPL; }
+    STDMETHODIMP OnLowResource(DWORD r) override { return m_inner?m_inner->OnLowResource(r):S_OK; }
+    STDMETHODIMP OnProgress(ULONG a, ULONG b, ULONG c, LPCWSTR d) override { return m_inner?m_inner->OnProgress(a,b,c,d):S_OK; }
+    STDMETHODIMP OnStopBinding(HRESULT h, LPCWSTR s) override { return m_inner?m_inner->OnStopBinding(h,s):S_OK; }
+    STDMETHODIMP GetBindInfo(DWORD* f, BINDINFO* bi) override { return m_inner?m_inner->GetBindInfo(f,bi):E_NOTIMPL; }
+    STDMETHODIMP OnDataAvailable(DWORD a, DWORD b, FORMATETC* c, STGMEDIUM* d) override { return m_inner?m_inner->OnDataAvailable(a,b,c,d):S_OK; }
+    STDMETHODIMP OnObjectAvailable(REFIID r, IUnknown* p) override { return m_inner?m_inner->OnObjectAvailable(r,p):S_OK; }
+
+    // IHttpNegotiate - the actual referer injection
+    STDMETHODIMP BeginningTransaction(LPCWSTR szURL, LPCWSTR szHeaders, DWORD, LPWSTR* pszAdditionalHeaders) override {
+        if (m_referer[0] && pszAdditionalHeaders) {
+            wchar_t buf[1100];
+            _snwprintf(buf, (sizeof(buf)/sizeof(wchar_t))-1, L"Referer: %s\r\n", m_referer);
+            buf[(sizeof(buf)/sizeof(wchar_t))-1]=L'\0';
+            size_t len=wcslen(buf)+1;
+            LPWSTR heap=(LPWSTR)CoTaskMemAlloc(len*sizeof(wchar_t));
+            if (heap) { wcscpy(heap,buf); *pszAdditionalHeaders=heap; return S_OK; }
+        }
+        *pszAdditionalHeaders=nullptr; return S_OK;
+    }
+    STDMETHODIMP OnResponse(DWORD, LPCWSTR, LPCWSTR, LPWSTR* pszAdditionalRequestHeaders) override {
+        if (pszAdditionalRequestHeaders) *pszAdditionalRequestHeaders=nullptr; return S_OK;
+    }
+};
+
+// UnityBindCallback is still used by our own downloads (URLOpenBlockingStreamW
+// and the custom cache downloader) to inject the Referer header. The control
+// itself no longer needs IBindHost: when a referer is set we feed the control a
+// local file path, so it never issues a network request of its own.
 
 class UnityClientSite : public IOleClientSite, public IOleInPlaceSite
 {
@@ -361,14 +444,18 @@ static BundleInfo ReadBundleFromFile(const wchar_t*path){
     return ParseHeader(buf,got);
 }
 static BundleInfo ReadBundleFromURL(const wchar_t*url){
+    // Probe version via URL Moniker so the same referer injection applies.
     unsigned char buf[64]={};
-    HINTERNET hi=InternetOpen(APP_NAME L"/1.2p",INTERNET_OPEN_TYPE_PRECONFIG,nullptr,nullptr,0);
-    if(!hi)return{false,"",0,0};
-    HINTERNET hu=InternetOpenUrl(hi,url,nullptr,0,
-                                 INTERNET_FLAG_RELOAD|INTERNET_FLAG_NO_CACHE_WRITE,0);
     DWORD got=0;
-    if(hu){InternetReadFile(hu,buf,sizeof(buf),&got);InternetCloseHandle(hu);}
-    InternetCloseHandle(hi);return ParseHeader(buf,got);
+    IStream* pStr=nullptr;
+    UnityBindCallback* cb=new UnityBindCallback(g_currentReferer,nullptr);
+    HRESULT hr=URLOpenBlockingStreamW(nullptr,url,&pStr,0,cb);
+    cb->Release();
+    if(SUCCEEDED(hr)&&pStr){
+        pStr->Read(buf,sizeof(buf),&got);
+        pStr->Release();
+    }
+    return ParseHeader(buf,got);
 }
 
 // ---------------------------------------------------------------------------
@@ -483,8 +570,19 @@ static void MruLoad(){
         wchar_t name[4];_snwprintf(name,3,L"%d",i);name[3]=0;
         DWORD sz=(DWORD)sizeof(g_mruList[0]),type;
         if(RegQueryValueEx(hk,name,nullptr,&type,(BYTE*)g_mruList[g_mruCount],&sz)
-                ==ERROR_SUCCESS&&type==REG_SZ&&g_mruList[g_mruCount][0])++g_mruCount;
-        else break;
+                ==ERROR_SUCCESS&&type==REG_SZ&&g_mruList[g_mruCount][0]){
+            g_mruReferer[g_mruCount][0]=L'\0';
+            g_mruRealSrc[g_mruCount][0]=L'\0';
+            wchar_t rname[8];_snwprintf(rname,7,L"%d_ref",i);rname[7]=0;
+            DWORD rsz=(DWORD)sizeof(g_mruReferer[0]),rtype;
+            RegQueryValueEx(hk,rname,nullptr,&rtype,(BYTE*)g_mruReferer[g_mruCount],&rsz);
+            g_mruReferer[g_mruCount][(MAX_PATH*2)-1]=L'\0';
+            wchar_t sname[8];_snwprintf(sname,7,L"%d_real",i);sname[7]=0;
+            DWORD ssz=(DWORD)sizeof(g_mruRealSrc[0]),stype;
+            RegQueryValueEx(hk,sname,nullptr,&stype,(BYTE*)g_mruRealSrc[g_mruCount],&ssz);
+            g_mruRealSrc[g_mruCount][(MAX_PATH*2)-1]=L'\0';
+            ++g_mruCount;
+        } else break;
     }
     RegCloseKey(hk);
 }
@@ -495,24 +593,49 @@ static void MruSave(){
     for(int i=0;i<g_mruCount;i++){
         wchar_t name[4];_snwprintf(name,3,L"%d",i);name[3]=0;
         RegSetValueEx(hk,name,0,REG_SZ,(const BYTE*)g_mruList[i],(DWORD)(wcslen(g_mruList[i])+1)*sizeof(wchar_t));
+        wchar_t rname[8];_snwprintf(rname,7,L"%d_ref",i);rname[7]=0;
+        RegSetValueEx(hk,rname,0,REG_SZ,(const BYTE*)g_mruReferer[i],(DWORD)(wcslen(g_mruReferer[i])+1)*sizeof(wchar_t));
+        wchar_t sname[8];_snwprintf(sname,7,L"%d_real",i);sname[7]=0;
+        RegSetValueEx(hk,sname,0,REG_SZ,(const BYTE*)g_mruRealSrc[i],(DWORD)(wcslen(g_mruRealSrc[i])+1)*sizeof(wchar_t));
     }
-    for(int i=g_mruCount;i<MRU_MAX;i++){wchar_t name[4];_snwprintf(name,3,L"%d",i);name[3]=0;RegDeleteValue(hk,name);}
+    for(int i=g_mruCount;i<MRU_MAX;i++){
+        wchar_t name[4];_snwprintf(name,3,L"%d",i);name[3]=0;RegDeleteValue(hk,name);
+        wchar_t rname[8];_snwprintf(rname,7,L"%d_ref",i);rname[7]=0;RegDeleteValue(hk,rname);
+        wchar_t sname[8];_snwprintf(sname,7,L"%d_real",i);sname[7]=0;RegDeleteValue(hk,sname);
+    }
     RegCloseKey(hk);
 }
-static void MruAdd(const wchar_t*pathArg){
+static void MruAdd(const wchar_t*pathArg,const wchar_t*refererArg=nullptr,
+                   const wchar_t*realSrcArg=nullptr){
     // Defensive copy – prevents aliasing if pathArg points into g_mruList itself
     wchar_t path[MAX_PATH*2];
     wcsncpy(path,pathArg,(MAX_PATH*2)-1);path[(MAX_PATH*2)-1]=L'\0';
+    wchar_t ref[MAX_PATH*2]={};
+    if(refererArg){wcsncpy(ref,refererArg,(MAX_PATH*2)-1);ref[(MAX_PATH*2)-1]=L'\0';}
+    // realSrc = path actually passed to Unity (cache file when referer is set).
+    // UPPEditor reads this to locate save data, which is keyed off this path.
+    wchar_t real[MAX_PATH*2]={};
+    if(realSrcArg){wcsncpy(real,realSrcArg,(MAX_PATH*2)-1);real[(MAX_PATH*2)-1]=L'\0';}
 
     for(int i=0;i<g_mruCount;i++){
         if(_wcsicmp(g_mruList[i],path)==0){
-            for(int j=i;j<g_mruCount-1;j++)wcscpy(g_mruList[j],g_mruList[j+1]);
+            for(int j=i;j<g_mruCount-1;j++){
+                wcscpy(g_mruList[j],g_mruList[j+1]);
+                wcscpy(g_mruReferer[j],g_mruReferer[j+1]);
+                wcscpy(g_mruRealSrc[j],g_mruRealSrc[j+1]);
+            }
             --g_mruCount;break;
         }
     }
     if(g_mruCount>=MRU_MAX)g_mruCount=MRU_MAX-1;
-    for(int i=g_mruCount;i>0;i--)wcscpy(g_mruList[i],g_mruList[i-1]);
+    for(int i=g_mruCount;i>0;i--){
+        wcscpy(g_mruList[i],g_mruList[i-1]);
+        wcscpy(g_mruReferer[i],g_mruReferer[i-1]);
+        wcscpy(g_mruRealSrc[i],g_mruRealSrc[i-1]);
+    }
     wcsncpy(g_mruList[0],path,(MAX_PATH*2)-1);g_mruList[0][(MAX_PATH*2)-1]=L'\0';
+    wcsncpy(g_mruReferer[0],ref,(MAX_PATH*2)-1);g_mruReferer[0][(MAX_PATH*2)-1]=L'\0';
+    wcsncpy(g_mruRealSrc[0],real,(MAX_PATH*2)-1);g_mruRealSrc[0][(MAX_PATH*2)-1]=L'\0';
     ++g_mruCount;MruSave();
 }
 static void RebuildFileMenu(){
@@ -752,6 +875,8 @@ static void InitDefaultStrings()
     SetString("OPEN_BROWSE_BTN",         L"&Browse...");
     SetString("OPEN_OK_BTN",             L"&OK");
     SetString("OPEN_CANCEL_BTN",         L"Cancel");
+    SetString("OPEN_ADV_GROUP",          L"&Advanced");
+    SetString("OPEN_ADV_REF_LABEL",      L"URL Spoofing:");
     SetString("OPEN_FILEDLG_TITLE",      L"Open Unity Bundle");
     SetString("OPEN_FILEDLG_FILTER_NAME",L"Unity Bundle (*.unity3d)");
     SetString("OPEN_FILEDLG_FILTER_ALL", L"All Files");
@@ -1079,14 +1204,109 @@ static bool UnityCreate(HWND hwnd,const wchar_t*srcUrl){
 }
 
 // ---------------------------------------------------------------------------
+//  Custom cache for referer-based loads
+//
+//  When a referer is set we cannot hand the URL straight to the control: some
+//  Unity ActiveX builds fetch src via raw wininet (ignoring any host-supplied
+//  bind hook) and get 403 -> "Invalid data file". So we download the .unity3d
+//  ourselves (with the referer injected) to a per-URL file under
+//  %APPDATA%\UFunPlayer\cache\<hash>.unity3d and load the control from that
+//  local path. The cache is wiped on close/exit so it never wastes disk.
+// ---------------------------------------------------------------------------
+
+// FNV-1a 64-bit over the URL bytes -> stable 16-hex-digit file name.
+// 64-bit is overkill for a per-user cache but makes collisions a non-issue:
+// even with 1 billion distinct URLs the collision odds are ~3e-12.
+static unsigned long long HashUrl64(const wchar_t* url){
+    if(!url)return 0;
+    unsigned long long h=14695981039346656037ULL;
+    for(const wchar_t* p=url;*p;p++){
+        unsigned int c=(unsigned int)*p;
+        h^=c; h*=1099511628211ULL;
+        c>>=8;
+        if(c){ h^=c; h*=1099511628211ULL; }
+    }
+    return h;
+}
+
+// Returns a static buffer with the cache file path for the given URL and
+// makes sure the cache directory exists.
+static const wchar_t* GetCachePath(const wchar_t* url){
+    static wchar_t cachePath[MAX_PATH];
+    wchar_t appData[MAX_PATH]={};
+    if(FAILED(SHGetFolderPathW(nullptr,CSIDL_APPDATA,nullptr,0,appData)) || !appData[0]){
+        wchar_t* env=_wgetenv(L"APPDATA");
+        if(env)wcsncpy(appData,env,MAX_PATH-1);
+    }
+    _snwprintf(cachePath,MAX_PATH-1,L"%s\\UFunPlayer\\cache\\%016llX.unity3d",
+               appData,HashUrl64(url));
+    cachePath[MAX_PATH-1]=L'\0';
+
+    // Ensure %APPDATA%\UFunPlayer\cache exists.
+    wchar_t dir[MAX_PATH];
+    wcsncpy(dir,cachePath,MAX_PATH-1);dir[MAX_PATH-1]=L'\0';
+    PathRemoveFileSpecW(dir);              // strip "<hash>.unity3d"
+    SHCreateDirectoryExW(nullptr,dir,nullptr);
+    return cachePath;
+}
+
+// Downloads `url` (with referer injected) into our cache file for that URL.
+// On success copies the cache path into outPath and returns true. The cache
+// dir is created by GetCachePath; any pre-existing file is overwritten by
+// URLDownloadToFileW so reloads always fetch fresh bytes.
+static bool DownloadToCustomCache(const wchar_t* url,const wchar_t* referer,
+                                  wchar_t* outPath,size_t outCap){
+    if(!url || !url[0])return false;
+    const wchar_t* cachePath=GetCachePath(url);
+
+    UnityBindCallback* cb=new UnityBindCallback(referer?referer:L"",nullptr);
+    HRESULT hr=URLDownloadToFileW(nullptr,url,cachePath,0,cb);
+    cb->Release();
+    if(FAILED(hr) || !PathFileExistsW(cachePath))return false;
+
+    if(outPath && outCap){
+        wcsncpy(outPath,cachePath,outCap-1);outPath[outCap-1]=L'\0';
+    }
+    return true;
+}
+
+// Wipe the whole cache directory (called on exit).
+static void PurgeCacheDir(){
+    wchar_t appData[MAX_PATH]={};
+    if(FAILED(SHGetFolderPathW(nullptr,CSIDL_APPDATA,nullptr,0,appData)) || !appData[0]){
+        wchar_t* env=_wgetenv(L"APPDATA");
+        if(env)wcsncpy(appData,env,MAX_PATH-1);
+    }
+    wchar_t dir[MAX_PATH];
+    _snwprintf(dir,MAX_PATH-1,L"%s\\UFunPlayer\\cache",appData);
+    dir[MAX_PATH-1]=L'\0';
+    if(!PathFileExistsW(dir))return;
+    DeleteFolderContents(dir);
+    RemoveDirectoryW(dir);
+}
+
+// ---------------------------------------------------------------------------
 //  Game loading – the central function
 // ---------------------------------------------------------------------------
-static void LoadFileOrUrl(const wchar_t*pathArg)
+static void LoadFileOrUrl(const wchar_t*pathArg,const wchar_t*refererArg)
 {
     wchar_t path[MAX_PATH*2];
     wcsncpy(path,pathArg,(MAX_PATH*2)-1);path[(MAX_PATH*2)-1]=L'\0';
 
     bool isUrl=(PathIsURL(path)==TRUE);
+
+    // Set referer before probing/loading so both paths see it.
+    g_currentReferer[0]=L'\0';
+    if(refererArg && refererArg[0]){
+        wcsncpy(g_currentReferer,refererArg,(sizeof(g_currentReferer)/sizeof(wchar_t))-1);
+        g_currentReferer[(sizeof(g_currentReferer)/sizeof(wchar_t))-1]=L'\0';
+    }
+
+    // Drop any cache file left by the previous game; ReloadGame re-downloads.
+    if(g_currentCacheFile[0]){
+        DeleteFileW(g_currentCacheFile);
+        g_currentCacheFile[0]=L'\0';
+    }
 
     if(!CheckAndWarnSavePath(path))return;
 
@@ -1115,20 +1335,44 @@ static void LoadFileOrUrl(const wchar_t*pathArg)
         CoFreeUnusedLibrariesEx(0,0);Sleep(150);
     }
 
-    if(!UnityCreate(g_hwndMain,path)){
+    // When a referer is set, download the .unity3d into our own cache file
+    // (referer injected) and load the control from that local path. This
+    // sidesteps the control's own network fetch entirely, so 403s from CDNs
+    // that check the referer can't happen. Save-path impact is acceptable:
+    // these games couldn't load at all without a referer before, so there's
+    // no prior save data to lose.
+    const wchar_t* loadSrc=path;
+    if(isUrl && g_currentReferer[0]){
+        wchar_t cacheFile[MAX_PATH]={};
+        if(DownloadToCustomCache(path,g_currentReferer,cacheFile,MAX_PATH)){
+            loadSrc=cacheFile;
+            wcsncpy(g_currentCacheFile,cacheFile,(sizeof(g_currentCacheFile)/sizeof(wchar_t))-1);
+            g_currentCacheFile[(sizeof(g_currentCacheFile)/sizeof(wchar_t))-1]=L'\0';
+        }
+    }
+
+    if(!UnityCreate(g_hwndMain,loadSrc)){
         SetStatus(LS("STATUS_CREATE_FAILED"));
-        g_currentPath[0]=L'\0';return;
+        g_currentPath[0]=L'\0';
+        if(g_currentCacheFile[0]){DeleteFileW(g_currentCacheFile);g_currentCacheFile[0]=L'\0';}
+        return;
     }
     g_gameLoaded=true;
-    MruAdd(path);RebuildFileMenu();
+    MruAdd(path,g_currentReferer,loadSrc);RebuildFileMenu();
 }
 
 static void ReloadGame(){
     if(!g_currentPath[0])return;
-    LoadFileOrUrl(g_currentPath);
+    // LoadFileOrUrl deletes the old cache file and re-downloads.
+    LoadFileOrUrl(g_currentPath,g_currentReferer);
 }
 static void CloseGame(){
+    if(g_currentCacheFile[0]){
+        DeleteFileW(g_currentCacheFile);
+        g_currentCacheFile[0]=L'\0';
+    }
     g_currentPath[0]=L'\0';
+    g_currentReferer[0]=L'\0';
     UnityDestroy();
     SetStatus(LS("STATUS_IDLE"));
 }
@@ -1169,6 +1413,7 @@ static void ToggleFullscreen(){
 //  Dialogs
 // ---------------------------------------------------------------------------
 static wchar_t g_openResult[MAX_PATH*2]={};
+static wchar_t g_openReferer[MAX_PATH*2]={};
 INT_PTR CALLBACK OpenDlgProc(HWND hDlg,UINT msg,WPARAM wp,LPARAM){
     switch(msg){
     case WM_INITDIALOG:
@@ -1177,9 +1422,12 @@ INT_PTR CALLBACK OpenDlgProc(HWND hDlg,UINT msg,WPARAM wp,LPARAM){
         SetDlgItemText(hDlg,IDC_OPEN_EXAMPLE,LS("OPEN_URL_EXAMPLE"));
         SetDlgItemText(hDlg,IDC_OPEN_SEPARATOR,LS("OPEN_BROWSE_SEPARATOR"));
         SetDlgItemText(hDlg,IDC_BROWSE,LS("OPEN_BROWSE_BTN"));
+        SetDlgItemText(hDlg,IDC_ADV_GROUP,LS("OPEN_ADV_GROUP"));
+        SetDlgItemText(hDlg,IDC_ADV_REF_LABEL,LS("OPEN_ADV_REF_LABEL"));
         SetDlgItemText(hDlg,IDOK,LS("OPEN_OK_BTN"));
         SetDlgItemText(hDlg,IDCANCEL,LS("OPEN_CANCEL_BTN"));
         if(g_openResult[0])SetDlgItemText(hDlg,IDC_URLEDIT,g_openResult);
+        if(g_openReferer[0])SetDlgItemText(hDlg,IDC_REFEDIT,g_openReferer);
         EnableWindow(GetDlgItem(hDlg,IDOK),g_openResult[0]!=L'\0');return TRUE;
     case WM_COMMAND:
         switch(LOWORD(wp)){
@@ -1207,12 +1455,18 @@ INT_PTR CALLBACK OpenDlgProc(HWND hDlg,UINT msg,WPARAM wp,LPARAM){
             if(GetOpenFileName(&ofn)){
                 SetDlgItemText(hDlg,IDC_URLEDIT,file);
                 EnableWindow(GetDlgItem(hDlg,IDOK),TRUE);}break;}
-        case IDOK:{wchar_t buf[MAX_PATH*2];GetDlgItemText(hDlg,IDC_URLEDIT,buf,MAX_PATH*2);
-            if(buf[0]){wcsncpy(g_openResult,buf,(MAX_PATH*2)-1);g_openResult[(MAX_PATH*2)-1]=0;EndDialog(hDlg,IDOK);}break;}
+        case IDOK:{
+            wchar_t buf[MAX_PATH*2];GetDlgItemText(hDlg,IDC_URLEDIT,buf,MAX_PATH*2);
+            if(buf[0]){
+                wcsncpy(g_openResult,buf,(MAX_PATH*2)-1);g_openResult[(MAX_PATH*2)-1]=0;
+                wchar_t ref[MAX_PATH*2];GetDlgItemText(hDlg,IDC_REFEDIT,ref,MAX_PATH*2);
+                wcsncpy(g_openReferer,ref,(MAX_PATH*2)-1);g_openReferer[(MAX_PATH*2)-1]=0;
+                EndDialog(hDlg,IDOK);}break;}
         case IDCANCEL:EndDialog(hDlg,IDCANCEL);break;}return TRUE;}return FALSE;
 }
 static bool ShowOpenDialog(){
     g_openResult[0]=L'\0';
+    g_openReferer[0]=L'\0';
     return DialogBox(g_hInst,MAKEINTRESOURCE(IDD_OPEN),g_hwndMain,OpenDlgProc)==IDOK&&g_openResult[0];
 }
 INT_PTR CALLBACK AboutDlgProc(HWND hDlg,UINT msg,WPARAM wp,LPARAM){
@@ -1289,7 +1543,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
         RebuildToolsMenu();
         if(g_pendingFile[0]){
             wchar_t tmp[MAX_PATH*2];wcsncpy(tmp,g_pendingFile,(MAX_PATH*2)-1);tmp[(MAX_PATH*2)-1]=0;
-            g_pendingFile[0]=L'\0';LoadFileOrUrl(tmp);}
+            wchar_t ref[MAX_PATH*2];wcsncpy(ref,g_pendingReferer,(MAX_PATH*2)-1);ref[(MAX_PATH*2)-1]=0;
+            g_pendingFile[0]=L'\0';g_pendingReferer[0]=L'\0';
+            LoadFileOrUrl(tmp,ref);}
         return 0;}
 
     case WM_LOADFILE:{
@@ -1312,14 +1568,15 @@ LRESULT CALLBACK MainWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
     case WM_COMMAND:{
         WORD id=LOWORD(wp);
         if(id>=IDM_RECENT_0&&id<IDM_RECENT_0+MRU_MAX){
-            int idx=id-IDM_RECENT_0;if(idx<g_mruCount)LoadFileOrUrl(g_mruList[idx]);return 0;}
+            int idx=id-IDM_RECENT_0;if(idx<g_mruCount)
+                LoadFileOrUrl(g_mruList[idx],g_mruReferer[idx]);return 0;}
         if(id>=IDM_TOOLS_ITEM_0&&id<IDM_TOOLS_ITEM_0+TOOLS_MAX){
             int idx=id-IDM_TOOLS_ITEM_0;if(idx<g_toolsCount)LaunchTool(g_toolsList[idx]);return 0;}
         if(id==IDM_LANG_BUILTIN_EN){ApplyLanguage(hwnd,L"");return 0;}
         if(id>=IDM_LANG_ITEM_0&&id<IDM_LANG_ITEM_0+LANG_MAX){
             int idx=id-IDM_LANG_ITEM_0;if(idx<g_langFileCount)ApplyLanguage(hwnd,g_langFiles[idx].code);return 0;}
         switch(id){
-        case IDM_FILE_OPEN:   if(ShowOpenDialog())LoadFileOrUrl(g_openResult);break;
+        case IDM_FILE_OPEN:   if(ShowOpenDialog())LoadFileOrUrl(g_openResult,g_openReferer);break;
         case IDM_FILE_RELOAD: ReloadGame();  break;
         case IDM_FILE_CLOSE:  CloseGame();   break;
         case IDM_FILE_EXIT:   DestroyWindow(hwnd);break;
@@ -1366,17 +1623,103 @@ LRESULT CALLBACK MainWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
 
     case WM_DESTROY:
         if(g_savedMenu){DestroyMenu(g_savedMenu);g_savedMenu=nullptr;}
-        UnityDestroy();PostQuitMessage(0);return 0;}
+        UnityDestroy();
+        PurgeCacheDir();   // wipe the whole cache dir on exit
+        PostQuitMessage(0);return 0;}
     return DefWindowProc(hwnd,msg,wp,lp);
 }
 
 // ---------------------------------------------------------------------------
-//  wWinMain  (Unicode entry point; link with -municode)
+//  unitywp:// protocol self-registration (HKCU, no admin needed)
+//  URL form:  unitywp://<gameURL>[|<referer>]
 // ---------------------------------------------------------------------------
+static void RegisterUnityWpProtocol(){
+    wchar_t exe[MAX_PATH*2];
+    GetModuleFileName(nullptr,exe,MAX_PATH*2);
+
+    const wchar_t* base=L"Software\\Classes\\unitywp";
+    HKEY hk;
+    if(RegCreateKeyEx(HKEY_CURRENT_USER,base,0,nullptr,0,KEY_WRITE,nullptr,&hk,nullptr)!=ERROR_SUCCESS)return;
+    const wchar_t* proto=L"URL:UFunPlayer Protocol";
+    RegSetValueEx(hk,nullptr,0,REG_SZ,(const BYTE*)proto,(DWORD)(wcslen(proto)+1)*2);
+    const wchar_t emptyStr[]=L"";
+    RegSetValueEx(hk,L"URL Protocol",0,REG_SZ,(const BYTE*)emptyStr,sizeof(wchar_t));
+    RegCloseKey(hk);
+
+    wchar_t sub[64];
+    wcscpy(sub,base);wcscat(sub,L"\\DefaultIcon");
+    if(RegCreateKeyEx(HKEY_CURRENT_USER,sub,0,nullptr,0,KEY_WRITE,nullptr,&hk,nullptr)==ERROR_SUCCESS){
+        RegSetValueEx(hk,nullptr,0,REG_SZ,(const BYTE*)exe,(DWORD)(wcslen(exe)+1)*2);
+        RegCloseKey(hk);
+    }
+    wcscpy(sub,base);wcscat(sub,L"\\shell\\open\\command");
+    if(RegCreateKeyEx(HKEY_CURRENT_USER,sub,0,nullptr,0,KEY_WRITE,nullptr,&hk,nullptr)==ERROR_SUCCESS){
+        wchar_t cmd[MAX_PATH*2+16];
+        _snwprintf(cmd,(sizeof(cmd)/sizeof(wchar_t))-1,L"\"%s\" \"%%1\"",exe);
+        cmd[(sizeof(cmd)/sizeof(wchar_t))-1]=0;
+        RegSetValueEx(hk,nullptr,0,REG_SZ,(const BYTE*)cmd,(DWORD)(wcslen(cmd)+1)*2);
+        RegCloseKey(hk);
+    }
+}
+
+// URL-decode (%XX -> char) in place. Browsers percent-encode '|' as %7C when
+// launching a custom protocol, so the referer separator arrives encoded.
+static void UrlDecodeInPlace(wchar_t* s){
+    if(!s)return;
+    wchar_t* r=s;   // read
+    wchar_t* w=s;   // write
+    while(*r){
+        if(*r==L'%' && r[1] && r[2]){
+            wchar_t hex[3]={r[1],r[2],0};
+            wchar_t* end=nullptr;
+            long v=wcstol(hex,&end,16);
+            if(end==hex+2){ *w++=(wchar_t)v; r+=3; continue; }
+        }
+        *w++=*r++;
+    }
+    *w=L'\0';
+}
+
+// Parse a command-line argument into game URL/path + optional referer.
+// Supports:  unitywp://URL            -> URL (referer empty)
+//            unitywp://URL|referer    -> URL + referer
+//            plain URL or local path  -> as-is (referer empty)
+// The '|' separator may arrive percent-encoded as %7C (browsers do this).
+static void ParseCmdArg(const wchar_t* arg,wchar_t* outGame,size_t gameCap,wchar_t* outRef,size_t refCap){
+    outGame[0]=L'\0';if(outRef)outRef[0]=L'\0';
+    if(!arg||!arg[0])return;
+
+    const wchar_t* wp=nullptr;
+    if(_wcsnicmp(arg,L"unitywp://",10)==0)wp=arg+10;
+    else if(_wcsnicmp(arg,L"unitywp:",8)==0)wp=arg+8;   // tolerate missing slashes
+    else wp=arg;   // plain URL / path
+
+    // Find the separator: literal '|' or encoded "%7C".
+    const wchar_t* bar=wcsstr(wp,L"|");
+    if(!bar) bar=wcsstr(wp,L"%7C");
+    if(bar){
+        size_t glen=(size_t)(bar-wp);if(glen>=gameCap)glen=gameCap-1;
+        wcsncpy(outGame,wp,glen);outGame[glen]=L'\0';
+        if(outRef){
+            const wchar_t* after = (bar[0]==L'|') ? bar+1 : bar+3;
+            wcsncpy(outRef,after,refCap-1);outRef[refCap-1]=L'\0';
+            UrlDecodeInPlace(outRef);   // referer likely has %2F, %3A, ...
+        }
+    }else{
+        wcsncpy(outGame,wp,gameCap-1);outGame[gameCap-1]=L'\0';
+    }
+}
+
 int WINAPI wWinMain(HINSTANCE hInst,HINSTANCE,LPWSTR,int nShow){
     g_hInst=hInst;
     GetModuleFileName(nullptr,g_exeDir,MAX_PATH);PathRemoveFileSpec(g_exeDir);
-    if(__argc>=2&&__wargv[1][0])wcsncpy(g_pendingFile,__wargv[1],(sizeof(g_pendingFile)/sizeof(wchar_t))-1);
+
+    RegisterUnityWpProtocol();
+
+    if(__argc>=2&&__wargv[1][0]){
+        ParseCmdArg(__wargv[1],g_pendingFile,sizeof(g_pendingFile)/sizeof(wchar_t),
+                    g_pendingReferer,sizeof(g_pendingReferer)/sizeof(wchar_t));
+    }
     MruLoad();
     SettingsLoad();
     if (g_toolsEnabled) ScanToolsFolder();
@@ -1394,6 +1737,20 @@ int WINAPI wWinMain(HINSTANCE hInst,HINSTANCE,LPWSTR,int nShow){
         }
         ApplyLanguage(nullptr, savedLangCode);
         SetStatus(LS("STATUS_IDLE"));
+    }
+
+    // Single-instance lock: different instances loading different Unity
+    // versions would clobber the shared runtime switch. Instead of nagging,
+    // silently bring the existing window to the foreground and exit.
+    g_hSingleInstance = CreateMutexW(nullptr, TRUE, L"Global\\UFunPlayerSingleInstance");
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        HWND existing = FindWindowW(L"UFunPlayerWnd", nullptr);
+        if (existing) {
+            if (IsIconic(existing)) ShowWindow(existing, SW_RESTORE);
+            SetForegroundWindow(existing);
+        }
+        if (g_hSingleInstance) { CloseHandle(g_hSingleInstance); g_hSingleInstance = nullptr; }
+        return 0;
     }
 
     OleInitialize(nullptr);
@@ -1421,5 +1778,7 @@ int WINAPI wWinMain(HINSTANCE hInst,HINSTANCE,LPWSTR,int nShow){
         if(!TranslateAccelerator(g_hwndMain,g_hAccel,&msg)){
             TranslateMessage(&msg);DispatchMessage(&msg);}
     }
-    OleUninitialize();return (int)msg.wParam;
+    OleUninitialize();
+    if (g_hSingleInstance) { CloseHandle(g_hSingleInstance); g_hSingleInstance = nullptr; }
+    return (int)msg.wParam;
 }

@@ -15,7 +15,7 @@ CFLAGS  = -m32 -std=c++14 -O2 -Wall -Wextra \
 LDFLAGS = -mwindows -municode -m32 -static
 
 LIBS    = -lole32 -loleaut32 -luuid \
-          -lshell32 -lshlwapi -lcomctl32 -lwininet -lcomdlg32
+          -lshell32 -lshlwapi -lcomctl32 -lwininet -lurlmon -lcomdlg32 -lws2_32
 
 all: $(TARGET)
 

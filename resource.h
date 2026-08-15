@@ -61,9 +61,12 @@
 // Open dialog controls
 #define IDC_URLEDIT          1101
 #define IDC_BROWSE           1102
+#define IDC_REFEDIT          1103
 #define IDC_OPEN_URLLABEL    7001   // "Enter the network location..." label
 #define IDC_OPEN_EXAMPLE     7002   // "Example: http://..." label
 #define IDC_OPEN_SEPARATOR   7003   // "--- or browse your local files ---"
+#define IDC_ADV_GROUP        7012   // "Advanced" group box
+#define IDC_ADV_REF_LABEL    7013   // "URL Spoofing:" label
 
 // About dialog controls
 #define IDC_ABOUT_VERSION    7004   // "UFunPlayer 1.2p" - set from code (APP_NAME/APP_VERSION), not translated
