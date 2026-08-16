@@ -28,12 +28,13 @@
 #include <stdlib.h>
 
 #include "resource.h"
+#include <MinHook.h>
 
 // ---------------------------------------------------------------------------
 //  Constants
 // ---------------------------------------------------------------------------
 #define APP_NAME       L"UFunPlayer"
-#define APP_VERSION    L"1.3"
+#define APP_VERSION    L"1.3p"
 #define GITHUB_URL     L"https://github.com/mtdcmz/UFunPlayer"
 #define RUNTIME_DL_URL L"https://github.com/mtdcmz/UFunPlayer/releases/latest/download/Runtime.zip"
 
@@ -58,6 +59,12 @@ static const CLSID CLSID_UnityWebPlayer = {
 // Custom window messages
 #define WM_POSTINIT  (WM_APP + 1)
 #define WM_LOADFILE  (WM_APP + 2)
+
+// Timer for delayed runtime hook installation (webplayer_win.dll loads
+// asynchronously after DoVerb, not during UnityCreate).
+#define TIMER_ID_INSTALL_HOOK   9550
+#define HOOK_RETRY_INTERVAL_MS  200
+#define HOOK_MAX_RETRIES        50   // 50 * 200ms = 10s max wait
 
 // ---------------------------------------------------------------------------
 //  Global state
@@ -93,13 +100,69 @@ static wchar_t g_exeDir[MAX_PATH] = {};
 static wchar_t g_pendingFile[MAX_PATH * 2] = {};
 static wchar_t g_pendingReferer[MAX_PATH * 2] = {};   // referer from cmdline/Open dialog
 static wchar_t g_currentReferer[MAX_PATH * 2] = {};   // referer for the loaded game
-static wchar_t g_currentCacheFile[MAX_PATH]    = {};   // our cache copy of the loaded .unity3d (empty if local/no-referer)
 static HANDLE  g_hSingleInstance = nullptr;            // mutex preventing multiple launches
+
+// OCX IAT hook state (see InstallOcxRefererHook). We patch the Unity
+// WebPlayer ActiveX loader's import of urlmon!RegisterBindStatusCallback so
+// that every bind context it creates for the src URL carries our Referer via
+// an IHttpNegotiate wrapper. This lets the control fetch src directly from the
+// network with the right referer, instead of us pre-downloading to a cache.
+//
+// No "installed" flag: UnityDestroy() calls CoFreeUnusedLibrariesEx, which may
+// unload the OCX. The next UnityCreate reloads a fresh, unpatched copy. So we
+// re-check on every call: if the IAT slot already points at our trampoline the
+// patch is still live (OCX wasn't unloaded); otherwise the slot holds the real
+// urlmon address (first time, or OCX was reloaded) and we (re)patch it.
+static HRESULT (WINAPI *g_origRegisterBindStatusCallback)(IBindCtx*,IBindStatusCallback*,IBindStatusCallback**,DWORD) = nullptr;
+
+// OCX IAT hook for LoadLibraryW: the OCX loads webplayer_win.dll via
+// LoadLibraryW asynchronously after DoVerb. We intercept that call so we can
+// install runtime hooks the INSTANT the DLL is loaded — before game scripts
+// run anti-piracy URL checks. A timer poll (old approach) was too slow: the
+// DLL took ~7s to load, and game scripts read absoluteURL before our 200ms
+// timer caught up.
+static HMODULE (WINAPI *g_origLoadLibraryW)(LPCWSTR) = nullptr;
+
+// ---- Runtime inline hooks (webplayer_win.dll) ----
+// Goal: make Application.absoluteURL / srcValue / webSecurityHostUrl return a
+// spoofed URL derived from g_currentReferer + filename, so local-file games
+// that run URL-based anti-piracy checks (e.g. if(!absoluteURL.Contains(
+// "www.4399.com")) Quit) still pass.
+//
+// Reverse-engineered against Unity 4.7.2f1 webplayer_win.dll:
+//   get_absoluteURL / get_webSecurityHostUrl share one impl: sub_101AB81D
+//     -> return mono_string_new( global_obj + 0xFC )   (std::string at +0xFC)
+//   get_srcValue                      impl: sub_101AB80B
+//     -> return mono_string_new( global_obj + 0x118 )
+//   mono_string_new(str,len) wrapper: sub_100C9AF4
+//
+// We inline-hook both impls and, when a spoofed URL is set, build a Mono
+// string ourselves via the same wrapper. When no spoof is active (URL games),
+// we fall through to the original so behaviour is unchanged.
+//
+// RVAs below are version-specific. Unknown versions skip hooking (local games
+// with anti-piracy then won't work, but URL games and local games without
+// URL checks are unaffected).
+static char  g_spoofedUrl[1024] = {};          // UTF-8, empty = no spoof
+static void* g_rtHookAbsURL  = nullptr;        // trampoline for sub_101AB81D
+static void* g_rtHookSrcVal  = nullptr;        // trampoline for sub_101AB80B
+static void* g_rtHookTgtAbsURL = nullptr;      // target addr (for MH_RemoveHook)
+static void* g_rtHookTgtSrcVal = nullptr;      // target addr (for MH_RemoveHook)
+static bool  g_rtHookTried   = false;          // avoid re-attempting per load
+static int   g_hookRetryCnt  = 0;              // timer-based retry counter
+
+// Forward declarations: UnityDestroy (above) needs to disable hooks before
+// the runtime is unloaded, so it references these symbols defined later.
+typedef void* (__cdecl *MonoStrNewFn)(const char*, int);
+typedef void* (__cdecl *GetterFn)();
+static MonoStrNewFn g_rtMonoStrNew = nullptr;
+static GetterFn     g_origAbsURL   = nullptr;
+static GetterFn     g_origSrcVal   = nullptr;
 
 // MRU list
 static wchar_t g_mruList[MRU_MAX][MAX_PATH * 2];
 static wchar_t g_mruReferer[MRU_MAX][MAX_PATH * 2];
-static wchar_t g_mruRealSrc[MRU_MAX][MAX_PATH * 2]; // 实际传给Unity的路径(带referer时为缓存路径)
+static wchar_t g_mruRealSrc[MRU_MAX][MAX_PATH * 2]; // Actual source path passed to Unity
 static int     g_mruCount = 0;
 
 // Tools menu state
@@ -133,9 +196,9 @@ static void LoadFileOrUrl(const wchar_t*,const wchar_t*refererArg=nullptr);
 static void ParseCmdArg(const wchar_t* arg,wchar_t* outGame,size_t gameCap,wchar_t* outRef,size_t refCap);
 static void ReloadGame();
 static void CloseGame();
-static const wchar_t* GetCachePath(const wchar_t* url);
-static bool DownloadToCustomCache(const wchar_t* url,const wchar_t* referer,wchar_t* outPath,size_t outCap);
-static void PurgeCacheDir();
+static void InstallOcxRefererHook();
+static void InstallOcxLoadLibraryHook();
+static bool InstallRuntimeHooks();
 static void SetStatus(const wchar_t*);
 static void ToggleFullscreen();
 static void RebuildFileMenu();
@@ -185,13 +248,13 @@ public:
 // ---------------------------------------------------------------------------
 //  Referer injection via URL Moniker binding
 //
-//  Unity Web Player ActiveX downloads its src URL through the URL Moniker
-//  binding layer (URLDownloadToCacheFile / IMoniker::BindToStorage), which
-//  queries the container's IServiceProvider for SID_SBindHost -> IBindHost.
-//  We implement IBindHost by wrapping every bind context with our own
-//  IBindStatusCallback + IHttpNegotiate, whose BeginningTransaction() injects
-//  the Referer header. This mirrors what Trident does for <object> in a real
-//  browser: the host supplies the referer, not the control.
+//  UnityBindCallback wraps an existing IBindStatusCallback and adds
+//  IHttpNegotiate::BeginningTransaction(), which injects a "Referer:" header.
+//  It is used in two places:
+//    1. Our own URL probes/downloads (URLOpenBlockingStreamW) in ReadBundleFromURL.
+//    2. The OCX IAT hook (InstallOcxRefererHook): we patch the loader's import
+//       of urlmon!RegisterBindStatusCallback so the control's own src bind goes
+//       through this wrapper, carrying the referer the user passed in.
 //
 //  g_currentReferer is read at bind time; set it before UnityCreate().
 //  Empty referer -> no injection, control behaves as before.
@@ -250,10 +313,7 @@ public:
     }
 };
 
-// UnityBindCallback is still used by our own downloads (URLOpenBlockingStreamW
-// and the custom cache downloader) to inject the Referer header. The control
-// itself no longer needs IBindHost: when a referer is set we feed the control a
-// local file path, so it never issues a network request of its own.
+// (UnityBindCallback is also used by ReadBundleFromURL's own URL probe.)
 
 class UnityClientSite : public IOleClientSite, public IOleInPlaceSite
 {
@@ -1173,12 +1233,41 @@ static void UnitySetPropW(const wchar_t*name,const wchar_t*value){
 static void UnityResize(int w,int h){
     if(!g_pIPO||w<=0||h<=0)return;RECT rc={0,0,w,h};g_pIPO->SetObjectRects(&rc,&rc);
 }
+// Remove existing runtime inline hooks using specific target addresses.
+// MH_RemoveHook(MH_ALL_HOOKS) is unreliable — concrete target guarantees removal.
+// NOTE: g_rtMonoStrNew is NOT cleared here — InstallRuntimeHooks assigns it
+// AFTER calling this, so clearing would wipe the new value.
+static void RemoveExistingRtHooks(){
+    if(g_rtHookTgtAbsURL){
+        MH_DisableHook(g_rtHookTgtAbsURL);
+        MH_RemoveHook(g_rtHookTgtAbsURL);
+        g_rtHookTgtAbsURL=nullptr;
+    }
+    if(g_rtHookTgtSrcVal){
+        MH_DisableHook(g_rtHookTgtSrcVal);
+        MH_RemoveHook(g_rtHookTgtSrcVal);
+        g_rtHookTgtSrcVal=nullptr;
+    }
+    g_rtHookAbsURL=nullptr;
+    g_rtHookSrcVal=nullptr;
+    g_origAbsURL=nullptr;
+    g_origSrcVal=nullptr;
+}
 static void UnityDestroy(){
+    // Stop the hook-install timer (if still polling) before tearing down.
+    if(g_hwndMain)KillTimer(g_hwndMain,TIMER_ID_INSTALL_HOOK);
     g_unityReady=false;g_gameLoaded=false;
     if(g_pIPO){g_pIPO->UIDeactivate();g_pIPO->InPlaceDeactivate();g_pIPO->Release();g_pIPO=nullptr;}
     if(g_pDisp){g_pDisp->Release();g_pDisp=nullptr;}
     if(g_pOleObj){g_pOleObj->Close(OLECLOSE_NOSAVE);g_pOleObj->Release();g_pOleObj=nullptr;}
     if(g_pSite){g_pSite->Release();g_pSite=nullptr;}
+    // Disable any runtime inline hooks before the runtime DLL gets unloaded by
+    // CoFreeUnusedLibrariesEx; otherwise the patched bytes would point into
+    // freed memory. The next UnityCreate cycle re-installs them if needed.
+    if(g_rtHookTried){
+        RemoveExistingRtHooks();
+        g_rtHookTried=false;
+    }
     CoFreeUnusedLibrariesEx(0,0);
     if(g_hwndMain)InvalidateRect(g_hwndMain,nullptr,TRUE);
 }
@@ -1189,6 +1278,13 @@ static bool UnityCreate(HWND hwnd,const wchar_t*srcUrl){
     if(FAILED(hr)){g_pSite->Release();g_pSite=nullptr;return false;}
     g_pOleObj->SetClientSite(g_pSite);OleSetContainedObject(g_pOleObj,TRUE);
     g_pOleObj->QueryInterface(IID_IDispatch,(void**)&g_pDisp);
+
+    // CoCreateInstance loaded the OCX; patch its IAT now so its src bind uses
+    // our Referer-injecting wrapper. Idempotent.
+    InstallOcxRefererHook();
+    // Also patch LoadLibraryW so we catch the async webplayer_win.dll load
+    // the instant it happens (before game scripts run anti-piracy checks).
+    InstallOcxLoadLibraryHook();
 
     UnitySetPropW(L"src",srcUrl);
     UnitySetPropW(L"backgroundcolor",L"000000");
@@ -1205,85 +1301,393 @@ static bool UnityCreate(HWND hwnd,const wchar_t*srcUrl){
 }
 
 // ---------------------------------------------------------------------------
-//  Custom cache for referer-based loads
+//  OCX IAT hook: inject Referer into the Unity WebPlayer loader's URL bind.
 //
-//  When a referer is set we cannot hand the URL straight to the control: some
-//  Unity ActiveX builds fetch src via raw wininet (ignoring any host-supplied
-//  bind hook) and get 403 -> "Invalid data file". So we download the .unity3d
-//  ourselves (with the referer injected) to a per-URL file under
-//  %APPDATA%\UFunPlayer\cache\<hash>.unity3d and load the control from that
-//  local path. The cache is wiped on close/exit so it never wastes disk.
+//  The loader's BSCb doesn't implement IHttpNegotiate, so no Referer is sent
+//  by default and CDNs requiring one return 403. We patch urlmon!
+//  RegisterBindStatusCallback in the OCX's IAT and wrap its BSCb with a
+//  UnityBindCallback that injects g_currentReferer via BeginningTransaction.
 // ---------------------------------------------------------------------------
 
-// FNV-1a 64-bit over the URL bytes -> stable 16-hex-digit file name.
-// 64-bit is overkill for a per-user cache but makes collisions a non-issue:
-// even with 1 billion distinct URLs the collision odds are ~3e-12.
-static unsigned long long HashUrl64(const wchar_t* url){
-    if(!url)return 0;
-    unsigned long long h=14695981039346656037ULL;
-    for(const wchar_t* p=url;*p;p++){
-        unsigned int c=(unsigned int)*p;
-        h^=c; h*=1099511628211ULL;
-        c>>=8;
-        if(c){ h^=c; h*=1099511628211ULL; }
+static HRESULT WINAPI HookRegisterBindStatusCallback(IBindCtx* pBC,
+                                                     IBindStatusCallback* pBSCb,
+                                                     IBindStatusCallback** ppBSCbPrev,
+                                                     DWORD dwReserved)
+{
+    if(g_currentReferer[0] && pBSCb){
+        UnityBindCallback* wrapped=new UnityBindCallback(g_currentReferer,pBSCb);
+        HRESULT hr=g_origRegisterBindStatusCallback(pBC,wrapped,ppBSCbPrev,dwReserved);
+        wrapped->Release();
+        return hr;
+    }
+    return g_origRegisterBindStatusCallback(pBC,pBSCb,ppBSCbPrev,dwReserved);
+}
+
+// Patch OCX IAT. Idempotent — skips if already patched, repatches if OCX reloaded.
+static void InstallOcxRefererHook(){
+    HMODULE hOcx=GetModuleHandleW(L"UnityWebPluginAX.ocx");
+    if(!hOcx)return;
+
+    BYTE* base=reinterpret_cast<BYTE*>(hOcx);
+    IMAGE_DOS_HEADER* dos=reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    if(dos->e_magic!=IMAGE_DOS_SIGNATURE)return;
+    IMAGE_NT_HEADERS* nt=reinterpret_cast<IMAGE_NT_HEADERS*>(base+dos->e_lfanew);
+    if(nt->Signature!=IMAGE_NT_SIGNATURE)return;
+
+    IMAGE_DATA_DIRECTORY* impDir=&nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if(!impDir->VirtualAddress)return;
+
+    IMAGE_IMPORT_DESCRIPTOR* desc=reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base+impDir->VirtualAddress);
+    for(;desc->Name;desc++){
+        const char* modName=reinterpret_cast<const char*>(base+desc->Name);
+        if(_stricmp(modName,"urlmon.dll")!=0)continue;
+
+        IMAGE_THUNK_DATA* thunk=reinterpret_cast<IMAGE_THUNK_DATA*>(base+desc->FirstThunk);
+        IMAGE_THUNK_DATA* origThunk=desc->OriginalFirstThunk
+            ? reinterpret_cast<IMAGE_THUNK_DATA*>(base+desc->OriginalFirstThunk)
+            : thunk;
+        for(;origThunk->u1.AddressOfData;origThunk++,thunk++){
+            if(IMAGE_SNAP_BY_ORDINAL(origThunk->u1.Ordinal))continue;
+            IMAGE_IMPORT_BY_NAME* ibn=reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(base+origThunk->u1.AddressOfData);
+            if(strcmp(reinterpret_cast<const char*>(ibn->Name),"RegisterBindStatusCallback")!=0)continue;
+
+            void* slot=&thunk->u1.Function;
+            FARPROC current=reinterpret_cast<FARPROC>(thunk->u1.Function);
+            // Already patched (OCX still loaded from last UnityCreate)? Nothing to do.
+            if(current==reinterpret_cast<FARPROC>(&HookRegisterBindStatusCallback))return;
+
+            DWORD oldProt=0;
+            if(!VirtualProtect(slot,sizeof(void*),PAGE_READWRITE,&oldProt))return;
+            g_origRegisterBindStatusCallback=reinterpret_cast<HRESULT(WINAPI*)(IBindCtx*,IBindStatusCallback*,IBindStatusCallback**,DWORD)>(current);
+            thunk->u1.Function=reinterpret_cast<ULONG_PTR>(&HookRegisterBindStatusCallback);
+            VirtualProtect(slot,sizeof(void*),oldProt,&oldProt);
+            return;
+        }
+    }
+}
+
+// Hook LoadLibraryW in the OCX so runtime hooks install the instant
+// webplayer_win.dll loads — before game scripts can read absoluteURL.
+static HMODULE WINAPI HookedLoadLibraryW(LPCWSTR libFileName)
+{
+    HMODULE h = g_origLoadLibraryW ? g_origLoadLibraryW(libFileName) : ::LoadLibraryW(libFileName);
+    if (libFileName) {
+        const wchar_t* base = wcsrchr(libFileName, L'\\');
+        if (!base) base = libFileName; else base++;
+        if (_wcsicmp(base, L"webplayer_win.dll") == 0) {
+            g_rtHookTried = false;
+            InstallRuntimeHooks();
+        }
     }
     return h;
 }
 
-// Returns a static buffer with the cache file path for the given URL and
-// makes sure the cache directory exists.
-static const wchar_t* GetCachePath(const wchar_t* url){
-    static wchar_t cachePath[MAX_PATH];
-    wchar_t appData[MAX_PATH]={};
-    if(FAILED(SHGetFolderPathW(nullptr,CSIDL_APPDATA,nullptr,0,appData)) || !appData[0]){
-        wchar_t* env=_wgetenv(L"APPDATA");
-        if(env)wcsncpy(appData,env,MAX_PATH-1);
-    }
-    _snwprintf(cachePath,MAX_PATH-1,L"%s\\UFunPlayer\\cache\\%016llX.unity3d",
-               appData,HashUrl64(url));
-    cachePath[MAX_PATH-1]=L'\0';
+// Patch OCX IAT: kernel32!LoadLibraryW -> HookedLoadLibraryW.
+static void InstallOcxLoadLibraryHook()
+{
+    HMODULE hOcx = GetModuleHandleW(L"UnityWebPluginAX.ocx");
+    if (!hOcx) return;
 
-    // Ensure %APPDATA%\UFunPlayer\cache exists.
-    wchar_t dir[MAX_PATH];
-    wcsncpy(dir,cachePath,MAX_PATH-1);dir[MAX_PATH-1]=L'\0';
-    PathRemoveFileSpecW(dir);              // strip "<hash>.unity3d"
-    SHCreateDirectoryExW(nullptr,dir,nullptr);
-    return cachePath;
+    BYTE* base = reinterpret_cast<BYTE*>(hOcx);
+    IMAGE_DOS_HEADER* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
+    IMAGE_NT_HEADERS* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return;
+
+    IMAGE_DATA_DIRECTORY* impDir = &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!impDir->VirtualAddress) return;
+
+    IMAGE_IMPORT_DESCRIPTOR* desc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + impDir->VirtualAddress);
+    for (; desc->Name; desc++) {
+        const char* modName = reinterpret_cast<const char*>(base + desc->Name);
+        // The OCX imports LoadLibraryW from kernel32.dll (or possibly kernelbase).
+        if (_stricmp(modName, "kernel32.dll") != 0) continue;
+
+        IMAGE_THUNK_DATA* thunk = reinterpret_cast<IMAGE_THUNK_DATA*>(base + desc->FirstThunk);
+        IMAGE_THUNK_DATA* origThunk = desc->OriginalFirstThunk
+            ? reinterpret_cast<IMAGE_THUNK_DATA*>(base + desc->OriginalFirstThunk)
+            : thunk;
+        for (; origThunk->u1.AddressOfData; origThunk++, thunk++) {
+            if (IMAGE_SNAP_BY_ORDINAL(origThunk->u1.Ordinal)) continue;
+            IMAGE_IMPORT_BY_NAME* ibn = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(base + origThunk->u1.AddressOfData);
+            if (strcmp(reinterpret_cast<const char*>(ibn->Name), "LoadLibraryW") != 0) continue;
+
+            void* slot = &thunk->u1.Function;
+            FARPROC current = reinterpret_cast<FARPROC>(thunk->u1.Function);
+            if (current == reinterpret_cast<FARPROC>(&HookedLoadLibraryW)) return;  // already patched
+
+            DWORD oldProt = 0;
+            if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &oldProt)) return;
+            g_origLoadLibraryW = reinterpret_cast<HMODULE(WINAPI*)(LPCWSTR)>(current);
+            thunk->u1.Function = reinterpret_cast<ULONG_PTR>(&HookedLoadLibraryW);
+            VirtualProtect(slot, sizeof(void*), oldProt, &oldProt);
+            return;
+        }
+    }
 }
 
-// Downloads `url` (with referer injected) into our cache file for that URL.
-// On success copies the cache path into outPath and returns true. The cache
-// dir is created by GetCachePath; any pre-existing file is overwritten by
-// URLDownloadToFileW so reloads always fetch fresh bytes.
-static bool DownloadToCustomCache(const wchar_t* url,const wchar_t* referer,
-                                  wchar_t* outPath,size_t outCap){
-    if(!url || !url[0])return false;
-    const wchar_t* cachePath=GetCachePath(url);
+// ---------------------------------------------------------------------------
+//  Runtime inline hooks (webplayer_win.dll)
+// ---------------------------------------------------------------------------
+// Signature-based icall lookup via Mono's registration table (names[] + impls[]).
+// No per-version RVAs needed.
 
-    UnityBindCallback* cb=new UnityBindCallback(referer?referer:L"",nullptr);
-    HRESULT hr=URLDownloadToFileW(nullptr,url,cachePath,0,cb);
-    cb->Release();
-    if(FAILED(hr) || !PathFileExistsW(cachePath))return false;
+struct PeRanges {
+    BYTE* textStart; BYTE* textEnd;
+    BYTE* dataStart; BYTE* dataEnd;  // .rdata + .data combined
+};
 
-    if(outPath && outCap){
-        wcsncpy(outPath,cachePath,outCap-1);outPath[outCap-1]=L'\0';
+static bool GetPeRanges(HMODULE hMod, PeRanges* r)
+{
+    if (!hMod || !r) return false;
+    BYTE* base = reinterpret_cast<BYTE*>(hMod);
+    IMAGE_DOS_HEADER* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+    IMAGE_NT_HEADERS* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
+    r->textStart = r->textEnd = r->dataStart = r->dataEnd = nullptr;
+    IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; i++) {
+        char name[9] = {};
+        memcpy(name, sec[i].Name, 8);
+        if (strcmp(name, ".text") == 0) {
+            r->textStart = base + sec[i].VirtualAddress;
+            r->textEnd = r->textStart + sec[i].Misc.VirtualSize;
+        } else if (strcmp(name, ".rdata") == 0 || strcmp(name, ".data") == 0) {
+            if (!r->dataStart) r->dataStart = base + sec[i].VirtualAddress;
+            BYTE* end = base + sec[i].VirtualAddress + sec[i].Misc.VirtualSize;
+            if (end > r->dataEnd) r->dataEnd = end;
+        }
     }
+    return r->textStart && r->dataStart;
+}
+
+static bool IsTextPtr(DWORD v, const PeRanges& r)
+{
+    return (DWORD)(uintptr_t)r.textStart <= v && v < (DWORD)(uintptr_t)r.textEnd;
+}
+static bool IsDataPtr(DWORD v, const PeRanges& r)
+{
+    return (DWORD)(uintptr_t)r.dataStart <= v && v < (DWORD)(uintptr_t)r.dataEnd;
+}
+static bool LooksLikeStringPtr(DWORD v, const PeRanges& r)
+{
+    if (!IsDataPtr(v, r)) return false;
+    BYTE b = *reinterpret_cast<BYTE*>(v);
+    return b >= 0x20 && b < 0x7f;
+}
+
+// Find a NUL-terminated string in .rdata/.data.
+static DWORD FindStringInData(const PeRanges& r, const char* target)
+{
+    size_t len = strlen(target);
+    for (BYTE* p = r.dataStart; p + len + 1 <= r.dataEnd; p++) {
+        if (memcmp(p, target, len) == 0 && p[len] == '\0') {
+            return (DWORD)(uintptr_t)p;
+        }
+    }
+    return 0;
+}
+
+// Locate a Mono icall implementation function by name.
+// Returns the function pointer, or nullptr if not found.
+static void* FindIcallImpl(HMODULE hRt, const char* icallName)
+{
+    PeRanges r;
+    if (!GetPeRanges(hRt, &r)) return nullptr;
+
+    // 1. Find the icall name string.
+    DWORD strAddr = FindStringInData(r, icallName);
+    if (!strAddr) return nullptr;
+
+    // 2. Find the names[] entry pointing to it.
+    DWORD namePtrAddr = 0;
+    for (DWORD* p = reinterpret_cast<DWORD*>(r.dataStart);
+         p < reinterpret_cast<DWORD*>(r.dataEnd); p++) {
+        if (*p == strAddr) { namePtrAddr = (DWORD)(uintptr_t)p; break; }
+    }
+    if (!namePtrAddr) return nullptr;
+
+    // 3. Scan back to find names[] array start (consecutive string ptrs).
+    DWORD* arrStart = reinterpret_cast<DWORD*>(namePtrAddr);
+    while (arrStart - 1 >= reinterpret_cast<DWORD*>(r.dataStart) &&
+           LooksLikeStringPtr(*(arrStart - 1), r)) {
+        arrStart--;
+    }
+
+    // 4. Scan forward to find names[] end, compute index.
+    DWORD* arrEnd = reinterpret_cast<DWORD*>(namePtrAddr) + 1;
+    while (arrEnd + 1 <= reinterpret_cast<DWORD*>(r.dataEnd)) {
+        DWORD v = *arrEnd;
+        if (v == 0 || !LooksLikeStringPtr(v, r)) break;
+        arrEnd++;
+    }
+    DWORD idx = (reinterpret_cast<DWORD*>(namePtrAddr) - arrStart);
+
+    // 5. Scan forward from arrEnd for impls[] (first block of .text ptrs).
+    DWORD* implStart = arrEnd;
+    while (implStart + 5 <= reinterpret_cast<DWORD*>(r.dataEnd)) {
+        DWORD v = *implStart;
+        if (IsTextPtr(v, r)) {
+            // Confirm it's a real array by checking a neighbour is also a text ptr.
+            bool ok = false;
+            for (int k = 1; k < 5; k++) {
+                DWORD v2 = *(implStart + k);
+                if (IsTextPtr(v2, r)) { ok = true; break; }
+                if (v2 == 0) break;
+            }
+            if (ok) break;
+        }
+        implStart++;
+    }
+    if (implStart + idx >= reinterpret_cast<DWORD*>(r.dataEnd)) return nullptr;
+
+    DWORD impl = *(implStart + idx);
+    if (!IsTextPtr(impl, r)) return nullptr;
+    return reinterpret_cast<void*>(impl);
+}
+
+// Parse the first N E8 rel32 call targets from a function's bytes.
+// Returns the number of calls found (up to maxOut).
+static int ParseCallTargets(BYTE* funcAddr, int scanLen, DWORD* outTargets, int maxOut)
+{
+    int count = 0;
+    for (int i = 0; i < scanLen && count < maxOut; ) {
+        if (funcAddr[i] == 0xE8) {
+            int rel = *reinterpret_cast<int*>(funcAddr + i + 1);
+            outTargets[count++] = (DWORD)(uintptr_t)(funcAddr + i + 5 + rel);
+            i += 5;
+        } else {
+            i++;
+        }
+    }
+    return count;
+}
+
+// Trace impl -> std_str_to_mono -> mono_string_new by parsing E8 call opcodes.
+static void* FindMonoStrNewFromImpl(void* implFunc)
+{
+    BYTE* impl = reinterpret_cast<BYTE*>(implFunc);
+    DWORD calls[3] = {};
+    int n = ParseCallTargets(impl, 20, calls, 3);
+    if (n < 2) return nullptr;
+    // calls[0] = global_getter, calls[1] = std_str_to_mono
+    BYTE* stdStrToMono = reinterpret_cast<BYTE*>(calls[1]);
+    DWORD innerCalls[2] = {};
+    int m = ParseCallTargets(stdStrToMono, 30, innerCalls, 2);
+    if (m < 1) return nullptr;
+    // innerCalls[0] = mono_string_new
+    return reinterpret_cast<void*>(innerCalls[0]);
+}
+
+// Detour: return spoofed MonoString if set, else call original.
+static volatile LONG g_absUrlCallCnt = 0;
+static void* __cdecl HookedGetAbsoluteURL()
+{
+    InterlockedIncrement(&g_absUrlCallCnt);
+    void* origRet = g_origAbsURL ? g_origAbsURL() : nullptr;
+    if (g_spoofedUrl[0] && g_rtMonoStrNew) {
+        return g_rtMonoStrNew(g_spoofedUrl, (int)strlen(g_spoofedUrl));
+    }
+    return origRet;
+}
+
+static volatile LONG g_srcValCallCnt = 0;
+static void* __cdecl HookedGetSrcValue()
+{
+    InterlockedIncrement(&g_srcValCallCnt);
+    void* origRet = g_origSrcVal ? g_origSrcVal() : nullptr;
+    if (g_spoofedUrl[0] && g_rtMonoStrNew) {
+        return g_rtMonoStrNew(g_spoofedUrl, (int)strlen(g_spoofedUrl));
+    }
+    return origRet;
+}
+
+// Build the spoofed URL string from g_currentReferer + the loaded file's name.
+//   https://www.4399.com/  +  trn2.unity3d  ->  https://www.4399.com/trn2.unity3d
+// For URL games we leave g_spoofedUrl empty (no spoof -> original behaviour).
+static void BuildSpoofedUrl(const wchar_t* path, const wchar_t* referer)
+{
+    g_spoofedUrl[0] = '\0';
+    if (!path || !path[0] || !referer || !referer[0]) return;
+    // Only spoof for local files. URL games already report a real URL.
+    if (PathIsURL(path) == TRUE) return;
+
+    // Extract host from referer: find "://" then take up to next '/'.
+    const wchar_t* p = wcsstr(referer, L"://");
+    if (!p) p = referer; else p += 3;
+    wchar_t host[256] = {};
+    size_t i = 0;
+    while (*p && *p != L'/' && *p != L'?' && *p != L'#' && i < 255) host[i++] = *p++;
+    host[i] = L'\0';
+    if (!host[0]) return;
+
+    // Extract filename from path.
+    const wchar_t* fn = wcsrchr(path, L'\\');
+    const wchar_t* fn2 = wcsrchr(path, L'/');
+    if (fn2 > fn) fn = fn2;
+    fn = fn ? fn + 1 : path;
+    if (!fn[0]) return;
+
+    // Compose "https://<host>/<filename>" as UTF-8.
+    wchar_t urlW[1024];
+    _snwprintf(urlW, 1023, L"https://%s/%s", host, fn);
+    urlW[1023] = L'\0';
+    WideCharToMultiByte(CP_UTF8, 0, urlW, -1, g_spoofedUrl, sizeof(g_spoofedUrl), nullptr, nullptr);
+    g_spoofedUrl[sizeof(g_spoofedUrl) - 1] = '\0';
+}
+
+// Install runtime inline hooks on get_absoluteURL/get_srcValue.
+// Idempotent per UnityCreate cycle; g_rtHookTried resets in UnityDestroy.
+static bool InstallRuntimeHooks()
+{
+    if (g_rtHookTried) return g_rtHookAbsURL != nullptr;
+
+    HMODULE hRt = GetModuleHandleW(L"webplayer_win.dll");
+    if (!hRt) return false;  // not loaded yet — timer retries; don't set tried
+    g_rtHookTried = true;
+
+    void* pAbsURL = FindIcallImpl(hRt, "UnityEngine.Application::get_absoluteURL");
+    void* pSrcVal = FindIcallImpl(hRt, "UnityEngine.Application::get_srcValue");
+    if (!pAbsURL || !pSrcVal) return false;
+
+    // Trace impl -> std_str_to_mono -> mono_string_new_len
+    g_rtMonoStrNew = reinterpret_cast<MonoStrNewFn>(FindMonoStrNewFromImpl(pAbsURL));
+    if (!g_rtMonoStrNew) return false;
+
+    static bool mhInited = false;
+    if (!mhInited) {
+        if (MH_Initialize() != MH_OK) return false;
+        mhInited = true;
+    }
+
+    RemoveExistingRtHooks();
+
+    MH_STATUS s1 = MH_CreateHook(pAbsURL, reinterpret_cast<void*>(&HookedGetAbsoluteURL),
+                                 reinterpret_cast<void**>(&g_origAbsURL));
+    if (s1 == MH_ERROR_ALREADY_CREATED) {
+        MH_RemoveHook(pAbsURL);
+        s1 = MH_CreateHook(pAbsURL, reinterpret_cast<void*>(&HookedGetAbsoluteURL),
+                           reinterpret_cast<void**>(&g_origAbsURL));
+    }
+    if (s1 != MH_OK) return false;
+    g_rtHookTgtAbsURL = pAbsURL;
+
+    MH_STATUS s2 = MH_CreateHook(pSrcVal, reinterpret_cast<void*>(&HookedGetSrcValue),
+                                 reinterpret_cast<void**>(&g_origSrcVal));
+    if (s2 == MH_ERROR_ALREADY_CREATED) {
+        MH_RemoveHook(pSrcVal);
+        s2 = MH_CreateHook(pSrcVal, reinterpret_cast<void*>(&HookedGetSrcValue),
+                           reinterpret_cast<void**>(&g_origSrcVal));
+    }
+    if (s2 != MH_OK) { RemoveExistingRtHooks(); return false; }
+    g_rtHookTgtSrcVal = pSrcVal;
+
+    if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) { RemoveExistingRtHooks(); return false; }
+
+    g_rtHookAbsURL = reinterpret_cast<void*>(g_origAbsURL);
+    g_rtHookSrcVal = reinterpret_cast<void*>(g_origSrcVal);
     return true;
-}
-
-// Wipe the whole cache directory (called on exit).
-static void PurgeCacheDir(){
-    wchar_t appData[MAX_PATH]={};
-    if(FAILED(SHGetFolderPathW(nullptr,CSIDL_APPDATA,nullptr,0,appData)) || !appData[0]){
-        wchar_t* env=_wgetenv(L"APPDATA");
-        if(env)wcsncpy(appData,env,MAX_PATH-1);
-    }
-    wchar_t dir[MAX_PATH];
-    _snwprintf(dir,MAX_PATH-1,L"%s\\UFunPlayer\\cache",appData);
-    dir[MAX_PATH-1]=L'\0';
-    if(!PathFileExistsW(dir))return;
-    DeleteFolderContents(dir);
-    RemoveDirectoryW(dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -1296,17 +1700,18 @@ static void LoadFileOrUrl(const wchar_t*pathArg,const wchar_t*refererArg)
 
     bool isUrl=(PathIsURL(path)==TRUE);
 
-    // Set referer before probing/loading so both paths see it.
-    g_currentReferer[0]=L'\0';
+    // Snapshot referer into a local buffer first: ReloadGame passes
+    // g_currentReferer as refererArg, so clearing g_currentReferer below
+    // would also zero out refererArg if we read it afterwards.
+    wchar_t refSnap[MAX_PATH*2]={};
     if(refererArg && refererArg[0]){
-        wcsncpy(g_currentReferer,refererArg,(sizeof(g_currentReferer)/sizeof(wchar_t))-1);
-        g_currentReferer[(sizeof(g_currentReferer)/sizeof(wchar_t))-1]=L'\0';
+        wcsncpy(refSnap,refererArg,(MAX_PATH*2)-1);
+        refSnap[(MAX_PATH*2)-1]=L'\0';
     }
-
-    // Drop any cache file left by the previous game; ReloadGame re-downloads.
-    if(g_currentCacheFile[0]){
-        DeleteFileW(g_currentCacheFile);
-        g_currentCacheFile[0]=L'\0';
+    g_currentReferer[0]=L'\0';
+    if(refSnap[0]){
+        wcsncpy(g_currentReferer,refSnap,(sizeof(g_currentReferer)/sizeof(wchar_t))-1);
+        g_currentReferer[(sizeof(g_currentReferer)/sizeof(wchar_t))-1]=L'\0';
     }
 
     if(!CheckAndWarnSavePath(path))return;
@@ -1336,42 +1741,29 @@ static void LoadFileOrUrl(const wchar_t*pathArg,const wchar_t*refererArg)
         CoFreeUnusedLibrariesEx(0,0);Sleep(150);
     }
 
-    // When a referer is set, download the .unity3d into our own cache file
-    // (referer injected) and load the control from that local path. This
-    // sidesteps the control's own network fetch entirely, so 403s from CDNs
-    // that check the referer can't happen. Save-path impact is acceptable:
-    // these games couldn't load at all without a referer before, so there's
-    // no prior save data to lose.
-    const wchar_t* loadSrc=path;
-    if(isUrl && g_currentReferer[0]){
-        wchar_t cacheFile[MAX_PATH]={};
-        if(DownloadToCustomCache(path,g_currentReferer,cacheFile,MAX_PATH)){
-            loadSrc=cacheFile;
-            wcsncpy(g_currentCacheFile,cacheFile,(sizeof(g_currentCacheFile)/sizeof(wchar_t))-1);
-            g_currentCacheFile[(sizeof(g_currentCacheFile)/sizeof(wchar_t))-1]=L'\0';
-        }
-    }
+    // For local files with a referer, spoof absoluteURL/srcValue so URL-based
+    // anti-piracy checks pass. URL games are left untouched.
+    BuildSpoofedUrl(path,refSnap);
 
-    if(!UnityCreate(g_hwndMain,loadSrc)){
+    if(!UnityCreate(g_hwndMain,path)){
         SetStatus(LS("STATUS_CREATE_FAILED"));
         g_currentPath[0]=L'\0';
-        if(g_currentCacheFile[0]){DeleteFileW(g_currentCacheFile);g_currentCacheFile[0]=L'\0';}
         return;
     }
+
+    // webplayer_win.dll loads lazily after DoVerb returns. Poll via timer
+    // until it appears, then install inline hooks.
+    g_hookRetryCnt=0;
+    SetTimer(g_hwndMain,TIMER_ID_INSTALL_HOOK,HOOK_RETRY_INTERVAL_MS,nullptr);
     g_gameLoaded=true;
-    MruAdd(path,g_currentReferer,loadSrc);RebuildFileMenu();
+    MruAdd(path,g_currentReferer,path);RebuildFileMenu();
 }
 
 static void ReloadGame(){
     if(!g_currentPath[0])return;
-    // LoadFileOrUrl deletes the old cache file and re-downloads.
     LoadFileOrUrl(g_currentPath,g_currentReferer);
 }
 static void CloseGame(){
-    if(g_currentCacheFile[0]){
-        DeleteFileW(g_currentCacheFile);
-        g_currentCacheFile[0]=L'\0';
-    }
     g_currentPath[0]=L'\0';
     g_currentReferer[0]=L'\0';
     UnityDestroy();
@@ -1633,10 +2025,19 @@ LRESULT CALLBACK MainWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
 
     case WM_KEYDOWN:if(wp==VK_F11){ToggleFullscreen();return 0;}break;
 
+    case WM_TIMER:
+        if(wp==TIMER_ID_INSTALL_HOOK){
+            g_hookRetryCnt++;
+            bool ok=InstallRuntimeHooks();
+            if(ok||g_rtHookTried||g_hookRetryCnt>=HOOK_MAX_RETRIES){
+                KillTimer(hwnd,TIMER_ID_INSTALL_HOOK);
+            }
+        }
+        return 0;
+
     case WM_DESTROY:
         if(g_savedMenu){DestroyMenu(g_savedMenu);g_savedMenu=nullptr;}
         UnityDestroy();
-        PurgeCacheDir();   // wipe the whole cache dir on exit
         PostQuitMessage(0);return 0;}
     return DefWindowProc(hwnd,msg,wp,lp);
 }
@@ -1676,20 +2077,34 @@ static void RegisterUnityWpProtocol(){
 
 // URL-decode (%XX -> char) in place. Browsers percent-encode '|' as %7C when
 // launching a custom protocol, so the referer separator arrives encoded.
+// Also handles UTF-8: consecutive %XX bytes form a multi-byte UTF-8 sequence
+// that must be converted to a single wchar_t (e.g. %E7%A9%BF -> U+7A7F, a CJK ideograph).
 static void UrlDecodeInPlace(wchar_t* s){
     if(!s)return;
-    wchar_t* r=s;   // read
-    wchar_t* w=s;   // write
-    while(*r){
+    // Phase 1: build a UTF-8 byte buffer.
+    //   %XX       -> one raw byte (may be part of a multi-byte sequence)
+    //   ASCII ch  -> one byte
+    //   other ch  -> UTF-8 encoding (up to 3 bytes per wchar_t)
+    int maxOut=(int)wcslen(s);  // decoded output is never longer than input
+    char buf[2048];
+    int blen=0;
+    for(const wchar_t* r=s; *r && blen<(int)sizeof(buf)-4; ){
         if(*r==L'%' && r[1] && r[2]){
             wchar_t hex[3]={r[1],r[2],0};
             wchar_t* end=nullptr;
             long v=wcstol(hex,&end,16);
-            if(end==hex+2){ *w++=(wchar_t)v; r+=3; continue; }
+            if(end==hex+2){ buf[blen++]=(char)(unsigned char)v; r+=3; continue; }
         }
-        *w++=*r++;
+        if(*r<0x80){
+            buf[blen++]=(char)*r;
+        }else{
+            blen+=WideCharToMultiByte(CP_UTF8,0,r,1,buf+blen,4,nullptr,nullptr);
+        }
+        r++;
     }
-    *w=L'\0';
+    // Phase 2: UTF-8 bytes -> wchar_t in place (output ≤ input length).
+    int wlen=MultiByteToWideChar(CP_UTF8,0,buf,blen,s,maxOut);
+    s[wlen]=L'\0';
 }
 
 // Parse a command-line argument into game URL/path + optional referer.
@@ -1720,6 +2135,10 @@ static void ParseCmdArg(const wchar_t* arg,wchar_t* outGame,size_t gameCap,wchar
     }else{
         wcsncpy(outGame,wp,gameCap-1);outGame[gameCap-1]=L'\0';
     }
+    // Browsers percent-encode local paths (e.g. backslash -> %5C, non-ASCII -> %XX UTF-8 bytes).
+    // Decode so ReadBundleFromFile can open the file. For URLs this is a no-op
+    // (scheme/host have no %XX).
+    UrlDecodeInPlace(outGame);
 }
 
 int WINAPI wWinMain(HINSTANCE hInst,HINSTANCE,LPWSTR,int nShow){
@@ -1801,6 +2220,8 @@ int WINAPI wWinMain(HINSTANCE hInst,HINSTANCE,LPWSTR,int nShow){
             TranslateMessage(&msg);DispatchMessage(&msg);}
     }
     OleUninitialize();
+    // Tear down any remaining MinHook state (no-op if never initialised).
+    MH_Uninitialize();
     if (g_hSingleInstance) { CloseHandle(g_hSingleInstance); g_hSingleInstance = nullptr; }
     return (int)msg.wParam;
 }
