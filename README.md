@@ -48,22 +48,20 @@ UFunPlayer will warn you on open if it detects that the save path is too long.
 
 The **Help → Clear User Data** menu item resets your recent‑file history and disables the Tools feature (you will need to re‑enable it via the menu). This is useful for privacy or troubleshooting.
 
-## URL Spoofing
+## Referer Spoofing
 
-Some game CDNs reject `.unity3d` downloads unless the request carries a valid `Referer` from the host site. UFunPlayer can fake that header so blocked games still load.
+Some game CDNs reject `.unity3d` downloads unless the request carries a valid `Referer` from the host site. UFunPlayer can inject that header so blocked games still load.
 
-Enter both the game URL and the referer URL in **File → Open**, then click **OK**. The file is downloaded with the spoofed referer and loaded locally. URL Spoofing only applies to remote URLs.
+Enter both the game URL and the referer URL in **File → Open**, then click **OK**. The request is sent with the spoofed referer and the bundle loads directly. Applies to remote URLs only.
 
-When spoofing is active, the downloaded file is cached under `%APPDATA%\UFunPlayer\cache\<hash>.unity3d` for the session and deleted on close or exit. Saves persist across sessions.
+## Browser Integration (unitywp: Protocol)
 
-## Browser Integration (unitywp:// Protocol)
-
-UFunPlayer registers the `unitywp://` protocol on startup so Chromium‑based browsers can launch it directly from a game page.
+UFunPlayer registers the `unitywp:` protocol on startup so Chromium‑based browsers can launch it directly from a game page.
 
 **URL format:**
 
 ```
-unitywp://<gameURL>|<refererURL>
+unitywp:<gameURL>|<refererURL>
 ```
 
 The `|` separator (URL‑encoded as `%7C` by browsers) is decoded by UFunPlayer. The referer part is optional.
