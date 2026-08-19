@@ -100,7 +100,7 @@ CAPTION "About UFunPlayer"
 FONT 8, "MS Shell Dlg"
 BEGIN
     ICON          IDI_MAINICON, IDC_STATIC, 10, 10, 0, 0
-    LTEXT         "UFunPlayer 1.2p",                       IDC_ABOUT_VERSION, 48, 12, 220, 12
+    LTEXT         "UFunPlayer 1.3p2",                      IDC_ABOUT_VERSION, 48, 12, 220, 12
     LTEXT         "A Standalone Unity Web Player",         IDC_ABOUT_TAGLINE, 48, 24, 220, 10
     LTEXT         "https://github.com/mtdcmz/UFunPlayer",  IDC_STATIC, 48, 36, 220, 10
     LTEXT         "",                                      IDC_STATIC, 10, 56, 260,  1, SS_ETCHEDHORZ

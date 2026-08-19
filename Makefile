@@ -17,7 +17,11 @@ CFLAGS  = -m32 -std=c++14 -O2 -Wall -Wextra \
 # -municode selects the wide-entry CRT startup (wWinMainCRTStartup), which
 # is what calls our wWinMain instead of an ANSI WinMain. Without this flag
 # the linker will complain about a missing WinMain / duplicate entry point.
-LDFLAGS = -mwindows -municode -m32 -static
+# --large-address-aware sets the IMAGE_FILE_LARGE_ADDRESS_AWARE bit in the
+# PE header so the 32-bit process gets a 4 GB/3 GB user VA (instead of 2 GB)
+# on 64-bit / 32-bit Windows respectively. Needed by some games whose map
+# deserialization would otherwise exceed the 2 GB limit and crash.
+LDFLAGS = -mwindows -municode -m32 -static -Wl,--large-address-aware
 
 LIBS    = -lole32 -loleaut32 -luuid \
           -lshell32 -lshlwapi -lcomctl32 -lwininet -lurlmon -lcomdlg32 -lws2_32 \

@@ -34,7 +34,7 @@
 //  Constants
 // ---------------------------------------------------------------------------
 #define APP_NAME       L"UFunPlayer"
-#define APP_VERSION    L"1.3p"
+#define APP_VERSION    L"1.3p2"
 #define GITHUB_URL     L"https://github.com/mtdcmz/UFunPlayer"
 #define RUNTIME_DL_URL L"https://github.com/mtdcmz/UFunPlayer/releases/latest/download/Runtime.zip"
 
