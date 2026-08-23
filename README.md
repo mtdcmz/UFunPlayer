@@ -1,6 +1,30 @@
-# UFunPlayer
+<p align="center">
+  <img src="ufunplayer.ico" alt="UFunPlayer" width="128" height="128">
+</p>
+
+<h1 align="center">UFunPlayer</h1>
+
+<p align="center"><em>"They had no player — so we made it ours."</em></p>
+
+<p align="center">
+  <a href="https://github.com/mtdcmz/UFunPlayer/stargazers"><img src="https://img.shields.io/github/stars/mtdcmz/UFunPlayer?style=flat-square&color=yellow" alt="Stars"></a>
+  <a href="https://github.com/mtdcmz/UFunPlayer/network/members"><img src="https://img.shields.io/github/forks/mtdcmz/UFunPlayer?style=flat-square&color=blue" alt="Forks"></a>
+  <a href="https://github.com/mtdcmz/UFunPlayer/issues"><img src="https://img.shields.io/github/issues/mtdcmz/UFunPlayer?style=flat-square&color=orange" alt="Issues"></a>
+  <a href="https://github.com/mtdcmz/UFunPlayer/releases/latest"><img src="https://img.shields.io/github/v/release/mtdcmz/UFunPlayer?style=flat-square&color=green" alt="Release"></a>
+  <a href="https://github.com/mtdcmz/UFunPlayer/releases/latest"><img src="https://img.shields.io/github/downloads/mtdcmz/UFunPlayer/total?style=flat-square&color=brightgreen" alt="Downloads"></a>
+  <img src="https://img.shields.io/badge/platform-Windows-blue?style=flat-square" alt="Platform">
+  <img src="https://img.shields.io/badge/license-GPLv3-blue?style=flat-square" alt="License">
+  <img src="https://img.shields.io/badge/lang-C%2B%2B-red?style=flat-square" alt="Language">
+</p>
 
 Standalone Unity Web Player for Windows. Drag, drop, play – no browser needed.
+
+> **Homage:** This project is a spiritual successor to
+> [UniPlayer](https://web.archive.org/web/20200701174743/http://www.nibiirosoft.com/Product/UniPlayer_en.html)
+> by [nibiirosoft](https://github.com/nibiirosoft) (nibiironokane), whose
+> slogan was *"If they have no player, let them make it."* The first version
+> of UFunPlayer was written by studying a decompiled UniPlayer; it has since
+> grown far beyond its inspiration.
 
 ## Usage
 
@@ -10,6 +34,24 @@ Standalone Unity Web Player for Windows. Drag, drop, play – no browser needed.
 4. Press **F11** to toggle full‑screen.
 
 The correct Unity runtime is selected automatically based on the bundle version.
+
+## Experimental Features
+
+**Control → Experimental Features → Frame Rate Override**
+
+Classic Unity Web Player games are frame‑limited — most are locked at 30 or
+60 fps by their own `targetFrameRate` / V‑Sync settings. This feature lifts
+the cap and lets you run games at any frame rate you choose (for example,
+30 fps games at a full 60):
+
+- Enter a target FPS and click **Apply** (0 disables the override, max 1000).
+- Works by neutralizing all three throttle layers — the loader's pump rate,
+  the engine's internal frame wait, and the GPU‑side present interval — for
+  both the D3D9 and D3D11 render paths, across all bundled runtime versions.
+- Changes usually apply immediately; if a game keeps its old frame rate,
+  reload the game.
+- V‑Sync stays disabled while the override is active, so mild screen tearing
+  may occur; targets above your monitor's refresh rate are capped by it.
 
 ## Tools Integration
 
@@ -30,14 +72,14 @@ Interface translations are supported via `.lang` files placed in a `langs` folde
 ## Save Data (PlayerPrefs) Warning
 
 Unity Web Player saves game data (PlayerPrefs) by encoding the **full path** of
-the `.unity3d` file into the save file name.  
+the `.unity3d` file into the save file name.
 
 If that path is very long, or contains many non‑ASCII characters (e.g. Chinese),
-the resulting save path can exceed Windows' 260‑character `MAX_PATH` limit.  
+the resulting save path can exceed Windows' 260‑character `MAX_PATH` limit.
 When that happens, **saves are silently lost** — the file is simply never written.
 
 ### How to keep saves working
-- Move the `.unity3d` file to a short, **all‑English** folder, for example:  
+- Move the `.unity3d` file to a short, **all‑English** folder, for example:
   `C:\Games\game.unity3d`
 - Keep both the folder names and the file name as short as possible.
 - Avoid deep nested directories.
@@ -66,9 +108,9 @@ unitywp:<gameURL>|<refererURL>
 
 The `|` separator (URL‑encoded as `%7C` by browsers) is decoded by UFunPlayer. The referer part is optional.
 
-A companion browser extension automates this on supported game pages. Source code: [mtdcmz/UFPLoader](https://github.com/mtdcmz/UFPLoader/).
+A companion browser extension automates this on supported game pages. Source code: `https://github.com/mtdcmz/UFPLoader/`.
 
 ## License
 
-Licensed under the GNU General Public License v3.0.  
+Licensed under the GNU General Public License v3.0.
 The full license text is in the [LICENSE](LICENSE) file.
