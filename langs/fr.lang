@@ -103,3 +103,17 @@ MSG_LAUNCH_TOOL_BODY=Échec du lancement :\n%s
 MSG_CLEARDATA_TITLE=Effacer les données utilisateur
 MSG_CLEARDATA_CONFIRM=Cela effacera l'historique de vos fichiers récents et réinitialisera l'avertissement d'activation des outils (les outils devront être réactivés).\n\nContinuer ?
 MSG_CLEARDATA_DONE=Les données utilisateur ont été effacées.
+
+# --- Fonctionnalités expérimentales (v1.4) ------------------------------------
+MENU_CTRL_EXPERIMENTAL=Fonctionnalités &expérimentales...
+EXP_TITLE=Fonctionnalités expérimentales
+EXP_FPS_GROUP=Remplacement de la fréquence d'images
+EXP_FPS_LABEL=FPS cible :
+EXP_FPS_ZERO=(0 = désactivé)
+EXP_FPS_STATUS_ON=Réglage actuel : %d FPS
+EXP_FPS_STATUS_OFF=Réglage actuel : désactivé (valeur du jeu)
+EXP_FPS_HINT=Force le lecteur à fonctionner à la fréquence d'images indiquée, en ignorant le limiteur d'images du jeu et le paramètre de synchronisation verticale. La synchronisation verticale reste désactivée tant que cette fonction est active, ce qui peut causer un léger déchirement de l'image. Les cibles supérieures au taux de rafraîchissement de l'écran sont limitées par celui-ci. Mettre 0 pour désactiver. Les changements s'appliquent généralement immédiatement ; sinon, rechargez le jeu.
+EXP_FPS_APPLY_BTN=&Appliquer
+EXP_CLOSE_BTN=Fermer
+EXP_FPS_BAD_VALUE=Saisissez une valeur entre 0 et 1000.
+EXP_FPS_SAVED=Enregistré. Les changements s'appliquent généralement immédiatement ; sinon, rechargez le jeu (Fichier > Recharger).

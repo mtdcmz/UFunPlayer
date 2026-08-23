@@ -102,3 +102,17 @@ MSG_LAUNCH_TOOL_BODY=No se pudo iniciar:\n%s
 MSG_CLEARDATA_TITLE=Borrar datos de usuario
 MSG_CLEARDATA_CONFIRM=Esto borrará su historial de archivos recientes y restablecerá el aviso de advertencia de herramientas (deberá volver a activarlas).\n\n¿Continuar?
 MSG_CLEARDATA_DONE=Los datos de usuario se han borrado.
+
+# --- Funciones experimentales (v1.4) ------------------------------------------
+MENU_CTRL_EXPERIMENTAL=Funciones &experimentales...
+EXP_TITLE=Funciones experimentales
+EXP_FPS_GROUP=Anulación de la velocidad de fotogramas
+EXP_FPS_LABEL=FPS objetivo:
+EXP_FPS_ZERO=(0 = desactivado)
+EXP_FPS_STATUS_ON=Ajuste actual: %d FPS
+EXP_FPS_STATUS_OFF=Ajuste actual: desactivado (valor del juego)
+EXP_FPS_HINT=Obliga al reproductor a funcionar con la velocidad de fotogramas indicada, ignorando el limitador propio del juego y la configuración de sincronización vertical. La sincronización vertical permanece desactivada mientras esta función esté activa, por lo que puede producirse un leve efecto de desgarro. Los objetivos superiores a la frecuencia de refresco del monitor están limitados por esta. Pon 0 para desactivarlo. Los cambios suelen aplicarse de inmediato; si no, recarga el juego.
+EXP_FPS_APPLY_BTN=&Aplicar
+EXP_CLOSE_BTN=Cerrar
+EXP_FPS_BAD_VALUE=Introduce un valor entre 0 y 1000.
+EXP_FPS_SAVED=Guardado. Los cambios suelen aplicarse de inmediato; si no, recarga el juego (Archivo > Recargar).

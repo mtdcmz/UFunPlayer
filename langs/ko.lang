@@ -101,3 +101,17 @@ MSG_LAUNCH_TOOL_BODY=실행하지 못했습니다:\n%s
 MSG_CLEARDATA_TITLE=사용자 데이터 지우기
 MSG_CLEARDATA_CONFIRM=최근 파일 기록이 지워지고 도구 사용 경고 알림 상태가 초기화됩니다 (도구를 다시 사용하려면 재동의가 필요합니다).\n\n계속하시겠습니까?
 MSG_CLEARDATA_DONE=사용자 데이터가 지워졌습니다.
+
+# --- 실험적 기능 (v1.4) -------------------------------------------------------
+MENU_CTRL_EXPERIMENTAL=실험적 기능(&F)...
+EXP_TITLE=실험적 기능
+EXP_FPS_GROUP=프레임 레이트 재정의
+EXP_FPS_LABEL=목표 FPS:
+EXP_FPS_ZERO=(0 = 비활성화)
+EXP_FPS_STATUS_ON=현재 설정: %d FPS
+EXP_FPS_STATUS_OFF=현재 설정: 비활성화 (게임 기본값)
+EXP_FPS_HINT=게임 자체의 프레임 제한 및 수직 동기화 설정을 무시하고 지정된 프레임 레이트로 강제 실행합니다. 기능이 활성화된 동안 수직 동기화는 꺼져 있어 가벼운 화면 찢어짐이 나타날 수 있습니다. 모니터 주사율을 초과하는 목표값은 제한됩니다. 0으로 설정하면 비활성화됩니다. 변경 사항은 대부분 즉시 적용되며, 적용되지 않으면 게임을 다시 불러오세요.
+EXP_FPS_APPLY_BTN=적용(&A)
+EXP_CLOSE_BTN=닫기
+EXP_FPS_BAD_VALUE=0에서 1000 사이의 값을 입력하세요.
+EXP_FPS_SAVED=저장되었습니다. 변경 사항은 대부분 즉시 적용되며, 적용되지 않으면 게임을 다시 불러오세요(파일 > 다시 불러오기).

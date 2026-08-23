@@ -101,3 +101,17 @@ MSG_LAUNCH_TOOL_BODY=啟動失敗：\n%s
 MSG_CLEARDATA_TITLE=清除使用者資料
 MSG_CLEARDATA_CONFIRM=這將清除您的最近開啟記錄，並重設「啟用工具」警告提示的狀態（之後需要重新同意才能啟用工具）。\n\n是否繼續？
 MSG_CLEARDATA_DONE=使用者資料已清除。
+
+# --- 實驗性功能 (v1.4) --------------------------------------------------------
+MENU_CTRL_EXPERIMENTAL=實驗性功能(&F)...
+EXP_TITLE=實驗性功能
+EXP_FPS_GROUP=幀率覆蓋
+EXP_FPS_LABEL=目標幀率：
+EXP_FPS_ZERO=（0 = 停用）
+EXP_FPS_STATUS_ON=目前設定：%d FPS
+EXP_FPS_STATUS_OFF=目前設定：停用（遊戲預設）
+EXP_FPS_HINT=強制播放器以指定幀率執行，無視遊戲自身的幀率限制和垂直同步設定。功能生效期間垂直同步保持關閉，可能出現輕微畫面撕裂。高於顯示器更新率的目標會受其限制。設為 0 可停用。修改通常立即生效；若遊戲幀率未變化，請重新載入遊戲。
+EXP_FPS_APPLY_BTN=套用(&A)
+EXP_CLOSE_BTN=關閉
+EXP_FPS_BAD_VALUE=請輸入 0 到 1000 之間的數值。
+EXP_FPS_SAVED=已儲存。修改通常立即生效；若未生效，請重新載入遊戲（檔案 > 重新載入）。

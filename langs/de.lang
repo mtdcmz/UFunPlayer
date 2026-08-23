@@ -102,3 +102,17 @@ MSG_LAUNCH_TOOL_BODY=Start fehlgeschlagen:\n%s
 MSG_CLEARDATA_TITLE=Benutzerdaten löschen
 MSG_CLEARDATA_CONFIRM=Dadurch werden Ihr Verlauf der zuletzt verwendeten Dateien gelöscht und der Warnhinweis für Werkzeuge zurückgesetzt (Werkzeuge müssen danach erneut aktiviert werden).\n\nFortfahren?
 MSG_CLEARDATA_DONE=Die Benutzerdaten wurden gelöscht.
+
+# --- Experimentelle Funktionen (v1.4) -----------------------------------------
+MENU_CTRL_EXPERIMENTAL=Experimentelle &Funktionen...
+EXP_TITLE=Experimentelle Funktionen
+EXP_FPS_GROUP=Bildwiederholrate überschreiben
+EXP_FPS_LABEL=Ziel-FPS:
+EXP_FPS_ZERO=(0 = deaktiviert)
+EXP_FPS_STATUS_ON=Aktuelle Einstellung: %d FPS
+EXP_FPS_STATUS_OFF=Aktuelle Einstellung: deaktiviert (Spielstandard)
+EXP_FPS_HINT=Zwingt den Player, mit der angegebenen Bildwiederholrate zu laufen, und ignoriert den eigenen Framerate-Limiter des Spiels sowie die V-Sync-Einstellung. Solange dies aktiv ist, bleibt V-Sync deaktiviert, wodurch leichte Bildfehler (Tearing) auftreten können. Ziele über der Bildwiederholfrequenz des Monitors werden durch diese begrenzt. Zum Deaktivieren 0 eintragen. Änderungen greifen meist sofort; falls nicht, das Spiel neu laden.
+EXP_FPS_APPLY_BTN=An&wenden
+EXP_CLOSE_BTN=Schließen
+EXP_FPS_BAD_VALUE=Geben Sie einen Wert zwischen 0 und 1000 ein.
+EXP_FPS_SAVED=Gespeichert. Änderungen greifen meist sofort; falls nicht, das Spiel neu laden (Datei > Neu laden).

@@ -21,6 +21,7 @@
 #define IDM_CTRL_QUALITY_L   3001
 #define IDM_CTRL_QUALITY_M   3002
 #define IDM_CTRL_QUALITY_H   3003
+#define IDM_CTRL_EXPERIMENTAL 3004
 
 // Menu items - Help
 #define IDM_HELP_REPO        4001
@@ -57,6 +58,7 @@
 #define IDD_ABOUT            301
 #define IDD_DOWNLOAD         302
 #define IDD_TOOLS_WARNING    303
+#define IDD_EXPERIMENTAL     304
 
 // Open dialog controls
 #define IDC_URLEDIT          1101
@@ -83,3 +85,12 @@
 // Tools Warning dialog controls
 #define IDC_TW_BODY          7010   // merged, auto-wrapping warning paragraph
 #define IDC_TW_NOASKAGAIN    7011   // "You will not be asked again after agreeing."
+
+// Experimental features dialog controls
+#define IDC_EXP_FPSEDIT      1301
+#define IDC_EXP_FPS_APPLY    1302
+#define IDC_EXP_FPS_GROUP    7020   // "Frame Rate Override" group box
+#define IDC_EXP_FPS_LABEL    7021   // "Target FPS:" label
+#define IDC_EXP_FPS_ZERO     7022   // "(0 = disabled)" hint next to the edit
+#define IDC_EXP_FPS_STATUS   7023   // current on/off status line (set from code)
+#define IDC_EXP_FPS_HINT     7024   // merged, auto-wrapping explanation paragraph

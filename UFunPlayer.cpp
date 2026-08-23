@@ -23,18 +23,21 @@
 #include <wininet.h>
 #include <urlmon.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
 #include <wchar.h>
 #include <stdlib.h>
 
 #include "resource.h"
 #include <MinHook.h>
+#include <d3d9.h>
+#include <dxgi.h>
 
 // ---------------------------------------------------------------------------
 //  Constants
 // ---------------------------------------------------------------------------
 #define APP_NAME       L"UFunPlayer"
-#define APP_VERSION    L"1.3p2"
+#define APP_VERSION    L"1.4"
 #define GITHUB_URL     L"https://github.com/mtdcmz/UFunPlayer"
 #define RUNTIME_DL_URL L"https://github.com/mtdcmz/UFunPlayer/releases/latest/download/Runtime.zip"
 
@@ -102,47 +105,22 @@ static wchar_t g_pendingReferer[MAX_PATH * 2] = {};   // referer from cmdline/Op
 static wchar_t g_currentReferer[MAX_PATH * 2] = {};   // referer for the loaded game
 static HANDLE  g_hSingleInstance = nullptr;            // mutex preventing multiple launches
 
-// OCX IAT hook state (see InstallOcxRefererHook). We patch the Unity
-// WebPlayer ActiveX loader's import of urlmon!RegisterBindStatusCallback so
-// that every bind context it creates for the src URL carries our Referer via
-// an IHttpNegotiate wrapper. This lets the control fetch src directly from the
-// network with the right referer, instead of us pre-downloading to a cache.
-//
-// No "installed" flag: UnityDestroy() calls CoFreeUnusedLibrariesEx, which may
-// unload the OCX. The next UnityCreate reloads a fresh, unpatched copy. So we
-// re-check on every call: if the IAT slot already points at our trampoline the
-// patch is still live (OCX wasn't unloaded); otherwise the slot holds the real
-// urlmon address (first time, or OCX was reloaded) and we (re)patch it.
+// OCX IAT hook state: patch the OCX's urlmon!RegisterBindStatusCallback import
+// so src downloads carry our Referer. Re-patched per UnityCreate — the OCX may
+// be unloaded between games.
 static HRESULT (WINAPI *g_origRegisterBindStatusCallback)(IBindCtx*,IBindStatusCallback*,IBindStatusCallback**,DWORD) = nullptr;
 
-// OCX IAT hook for LoadLibraryW: the OCX loads webplayer_win.dll via
-// LoadLibraryW asynchronously after DoVerb. We intercept that call so we can
-// install runtime hooks the INSTANT the DLL is loaded — before game scripts
-// run anti-piracy URL checks. A timer poll (old approach) was too slow: the
-// DLL took ~7s to load, and game scripts read absoluteURL before our 200ms
-// timer caught up.
+// OCX IAT hook: intercept the OCX's LoadLibraryW so runtime hooks install the
+// moment webplayer_win.dll loads (timer polling was too slow).
 static HMODULE (WINAPI *g_origLoadLibraryW)(LPCWSTR) = nullptr;
+static HMODULE (WINAPI *g_origLoadLibraryExW)(LPCWSTR, HANDLE, DWORD) = nullptr;
+static HMODULE (WINAPI *g_origLoadLibraryA)(LPCSTR) = nullptr;
+static HMODULE (WINAPI *g_origLoadLibraryExA)(LPCSTR, HANDLE, DWORD) = nullptr;
 
 // ---- Runtime inline hooks (webplayer_win.dll) ----
-// Goal: make Application.absoluteURL / srcValue / webSecurityHostUrl return a
-// spoofed URL derived from g_currentReferer + filename, so local-file games
-// that run URL-based anti-piracy checks (e.g. if(!absoluteURL.Contains(
-// "www.4399.com")) Quit) still pass.
-//
-// Reverse-engineered against Unity 4.7.2f1 webplayer_win.dll:
-//   get_absoluteURL / get_webSecurityHostUrl share one impl: sub_101AB81D
-//     -> return mono_string_new( global_obj + 0xFC )   (std::string at +0xFC)
-//   get_srcValue                      impl: sub_101AB80B
-//     -> return mono_string_new( global_obj + 0x118 )
-//   mono_string_new(str,len) wrapper: sub_100C9AF4
-//
-// We inline-hook both impls and, when a spoofed URL is set, build a Mono
-// string ourselves via the same wrapper. When no spoof is active (URL games),
-// we fall through to the original so behaviour is unchanged.
-//
-// RVAs below are version-specific. Unknown versions skip hooking (local games
-// with anti-piracy then won't work, but URL games and local games without
-// URL checks are unaffected).
+// Spoof Application.absoluteURL / srcValue / webSecurityHostUrl from
+// g_currentReferer + filename so URL-based anti-piracy checks pass.
+// RVAs are specific to Unity 4.7.2f1; other versions skip hooking.
 static char  g_spoofedUrl[1024] = {};          // UTF-8, empty = no spoof
 static void* g_rtHookAbsURL  = nullptr;        // trampoline for sub_101AB81D
 static void* g_rtHookSrcVal  = nullptr;        // trampoline for sub_101AB80B
@@ -150,6 +128,124 @@ static void* g_rtHookTgtAbsURL = nullptr;      // target addr (for MH_RemoveHook
 static void* g_rtHookTgtSrcVal = nullptr;      // target addr (for MH_RemoveHook)
 static bool  g_rtHookTried   = false;          // avoid re-attempting per load
 static int   g_hookRetryCnt  = 0;              // timer-based retry counter
+
+// file:// URL of the current game data file. Used as the base URL for
+// resolving relative WWW downloads (multi-bundle games).
+static wchar_t g_gameFileUrl[MAX_PATH * 2] = {};
+typedef HRESULT (WINAPI *CoInternetCombineUrlFn)(LPCWSTR, LPCWSTR, DWORD, LPWSTR, DWORD, DWORD*, DWORD);
+static CoInternetCombineUrlFn g_pCoInternetCombineUrl = nullptr;
+
+// ---- Experimental: frame-rate override hooks ----
+// Throttle chain: npUnity3D32.dll pumps UnityWinWebLoop at the rate reported
+// by UnityGetPlayerTargetFPS(); the engine's internal frame wait uses
+// targetFrameRate/vSyncCount; the GPU-side Present blocks per the (vsync-
+// derived) presentation interval. The hooks below neutralize all three.
+static int   g_fpsTarget    = 0;            // user FPS, 0 = off (from registry)
+static int   g_rtLoopCalls  = 0;            // completed UnityWinWebLoop pumps
+static void* g_rtHookTgtGetFPS  = nullptr;  // UnityGetPlayerTargetFPS (for MH_RemoveHook)
+static void* g_rtOrigGetFPS    = nullptr;   // trampoline
+static void* g_rtHookTgtLoop   = nullptr;   // UnityWinWebLoop (for MH_RemoveHook)
+static void* g_rtOrigLoop      = nullptr;   // trampoline
+static void* g_rtHookTgtSetTfr = nullptr;   // Application::set_targetFrameRate
+static void* g_rtOrigSetTfr    = nullptr;   // trampoline
+static void* g_rtHookTgtSetVsy = nullptr;   // QualitySettings::set_vSyncCount
+static void* g_rtOrigSetVsy    = nullptr;   // trampoline
+
+// ---- Experimental: D3D9 interception ----
+// Direct3DCreate9 is resolved dynamically; hooking the function body (not an
+// IAT slot — GetProcAddress is a delay-load import here and patches get
+// wiped on first call) lets us force an IMMEDIATE PresentationInterval in
+// CreateDevice/Reset.
+typedef IDirect3D9* (WINAPI *D3DCreate9Fn)(UINT);
+typedef HRESULT (WINAPI *D3DCreateDeviceFn)(IDirect3D9*, UINT, D3DDEVTYPE,
+                                            HWND, DWORD, D3DPRESENT_PARAMETERS*,
+                                            IDirect3DDevice9**);
+typedef HRESULT (WINAPI *D3DResetFn)(IDirect3DDevice9*, D3DPRESENT_PARAMETERS*);
+typedef HRESULT (WINAPI *D3DPresentFn)(IDirect3DDevice9*, const RECT*,
+                                       const RECT*, HWND, const RGNDATA*);
+static void* g_rtHookTgtD3D9 = nullptr;      // Direct3DCreate9 (for MH_RemoveHook)
+static D3DCreate9Fn    g_origD3DCreate9    = nullptr;
+static D3DCreateDeviceFn g_origD3DCreateDevice = nullptr;
+static D3DResetFn      g_origD3DReset      = nullptr;
+static D3DPresentFn    g_origD3DPresent    = nullptr;
+static void** g_d3d9VtSlotCreate   = nullptr;  // &IDirect3D9::vft[16]
+static void** g_devVtSlotReset     = nullptr;  // &IDirect3DDevice9::vft[16]
+static void** g_devVtSlotPresent   = nullptr;  // &IDirect3DDevice9::vft[17]
+
+// ---- Experimental: DXGI interception (D3D11 path, Unity 5.x) ----
+// Swap chains come from IDXGIFactory2::CreateSwapChainForHwnd (vtable slot
+// 15; the legacy CreateSwapChain is never called). Present takes the sync
+// interval per call — force 0.
+typedef HRESULT (WINAPI *DxgiCreateFactoryFn)(REFIID, void**);
+// MinGW's dxgi.h predates DXGI 1.2 — declare the DXGI 1.2 pieces by hand.
+interface IDXGISwapChain1;
+struct DXGI_SWAP_CHAIN_FULLSCREEN_DESC;
+typedef HRESULT (WINAPI *DxgiCreateSwapChainForHwndFn)(void*, IUnknown*,
+                                                       HWND, const void*,
+                                                       const void*,
+                                                       IDXGIOutput*, IDXGISwapChain1**);
+typedef HRESULT (WINAPI *DxgiPresentFn)(IDXGISwapChain*, UINT, UINT);
+static void* g_rtHookTgtDxgiF  = nullptr;    // CreateDXGIFactory (for MH_RemoveHook)
+static void* g_rtHookTgtDxgiF1 = nullptr;    // CreateDXGIFactory1 (for MH_RemoveHook)
+static DxgiCreateFactoryFn g_origCreateDxgiFactory  = nullptr;
+static DxgiCreateFactoryFn g_origCreateDxgiFactory1 = nullptr;
+static void** g_dxgiFtSlotCreateSwapChain = nullptr;  // &IDXGIFactory2::vft[15]
+static void* g_origDxgiCreateSwapChain = nullptr;    // original CreateSwapChainForHwnd
+static void** g_scVtSlotPresent = nullptr;   // &IDXGISwapChain::vft[8]
+static DxgiPresentFn g_origSwapChainPresent = nullptr;
+
+// ---- Adaptive loader-rate compensation ----
+// The loader schedules pump ticks as period = FLOOR + 1000/report (ms),
+// where `report` is what our UnityGetPlayerTargetFPS hook returns and
+// FLOOR (≈ one refresh period) is pacing we cannot remove. The two delays
+// SERIALIZE, so reporting the user's target verbatim self-throttles. We
+// measure the achieved period every 60 queries, track FLOOR with an EMA,
+// and solve `report` for the user's target.
+static DWORD g_monitorRefreshHz = 60;
+static double g_baseTickMs = 16.7;    // EMA of the inherent per-tick floor
+static int    g_reportFps  = 1000;   // value returned to the loader
+static LARGE_INTEGER g_windowStart = {};  // QPC of current measure window
+static volatile LONG g_fpsQueryCount = 0; // loader FPS queries (adaptive step)
+static LARGE_INTEGER g_qpcFreq = {};      // QPC frequency
+// While the override is active the engine's own targetFrameRate is forced
+// high so its internal slot wait never throttles — the loader timer (via
+// our adaptive report value) is the single pacer.
+static const int ENGINE_TFR_ACTIVE = 1000;
+
+static int ComputeReportFpsFor(double baseMs)
+{
+    if (g_fpsTarget <= 0) return 0;
+    double period = 1000.0 / g_fpsTarget;
+    if (period <= baseMs + 2.0) return 1000;
+    int r = (int)(1000.0 / (period - baseMs) + 0.5);
+    if (r < 1) r = 1;
+    if (r > 1000) r = 1000;
+    return r;
+}
+
+// Adaptive compensation step: called every 60 FPS queries (~1 s). Windows
+// outside 0.2–4 s are ignored (engine init / loading stalls would poison
+// the estimate).
+static void FpsAdaptiveStep()
+{
+    if (!g_qpcFreq.QuadPart || !g_windowStart.QuadPart) return;
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    double windowMs = 1000.0 * (now.QuadPart - g_windowStart.QuadPart)
+                    / g_qpcFreq.QuadPart;
+    QueryPerformanceCounter(&g_windowStart);
+    if (windowMs < 200.0 || windowMs > 4000.0) return;
+    double periodAvg = windowMs / 60.0;
+    double reportContrib = (g_reportFps >= 1000) ? 1.0 : 1000.0 / g_reportFps;
+    double baseMeas = periodAvg - reportContrib;
+    if (baseMeas < 0.0) baseMeas = 0.0;
+    if (baseMeas > 250.0) baseMeas = 250.0;
+    g_baseTickMs = 0.6 * g_baseTickMs + 0.4 * baseMeas;
+    g_reportFps = ComputeReportFpsFor(g_baseTickMs);
+}
+
+// defined later (after the runtime-hook machinery they belong to)
+static void RestoreVtableSlot(void** slot, void* savedOrig);
 
 // Forward declarations: UnityDestroy (above) needs to disable hooks before
 // the runtime is unloaded, so it references these symbols defined later.
@@ -189,6 +285,7 @@ INT_PTR CALLBACK OpenDlgProc(HWND,UINT,WPARAM,LPARAM);
 INT_PTR CALLBACK AboutDlgProc(HWND,UINT,WPARAM,LPARAM);
 INT_PTR CALLBACK DownloadDlgProc(HWND,UINT,WPARAM,LPARAM);
 INT_PTR CALLBACK ToolsWarningDlgProc(HWND,UINT,WPARAM,LPARAM);
+INT_PTR CALLBACK ExperimentalDlgProc(HWND,UINT,WPARAM,LPARAM);
 static void UnityDestroy();
 static bool UnityCreate(HWND,const wchar_t*);
 static void UnityResize(int,int);
@@ -198,6 +295,7 @@ static void ReloadGame();
 static void CloseGame();
 static void InstallOcxRefererHook();
 static void InstallOcxLoadLibraryHook();
+static void InstallOcxUrlResolveHook();
 static bool InstallRuntimeHooks();
 static void SetStatus(const wchar_t*);
 static void ToggleFullscreen();
@@ -321,9 +419,16 @@ public:
     LONG           m_refs;
     HWND           m_hwnd;
     UnityFrameSite m_frame;
+    wchar_t        m_url[MAX_PATH * 2];   // file:// URL for GetMoniker base context
 
-    explicit UnityClientSite(HWND hwnd)
-        : m_refs(1), m_hwnd(hwnd), m_frame(this) {}
+    explicit UnityClientSite(HWND hwnd, const wchar_t* url = nullptr)
+        : m_refs(1), m_hwnd(hwnd), m_frame(this) {
+        m_url[0] = L'\0';
+        if (url) {
+            wcsncpy(m_url, url, (sizeof(m_url)/sizeof(wchar_t))-1);
+            m_url[(sizeof(m_url)/sizeof(wchar_t))-1] = L'\0';
+        }
+    }
 
     // IUnknown
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
@@ -345,7 +450,10 @@ public:
 
     // IOleClientSite
     STDMETHODIMP SaveObject()                     override { return E_NOTIMPL; }
-    STDMETHODIMP GetMoniker(DWORD, DWORD, IMoniker**) override { return E_NOTIMPL; }
+    STDMETHODIMP GetMoniker(DWORD, DWORD, IMoniker** ppmk) override {
+        if (!m_url[0]) return E_NOTIMPL;
+        return CreateURLMoniker(nullptr, m_url, ppmk);
+    }
     STDMETHODIMP GetContainer(IOleContainer** pp)  override { *pp=nullptr; return E_NOINTERFACE; }
     STDMETHODIMP ShowObject()                      override { return S_OK; }
     STDMETHODIMP OnShowWindow(BOOL)                override { return S_OK; }
@@ -727,12 +835,27 @@ static void RebuildFileMenu(){
 static void SettingsLoad()
 {
     g_toolsEnabled = false;
+    g_fpsTarget    = 0;
     HKEY hk = nullptr;
     if (RegOpenKeyEx(HKEY_CURRENT_USER, REG_SETTINGS_KEY, 0, KEY_READ, &hk) == ERROR_SUCCESS) {
         DWORD val = 0, sz = sizeof(val), type = 0;
         if (RegQueryValueEx(hk, L"ToolsEnabled", nullptr, &type, (BYTE*)&val, &sz) == ERROR_SUCCESS
                 && type == REG_DWORD)
             g_toolsEnabled = (val != 0);
+        val = 0; sz = sizeof(val); type = 0;
+        if (RegQueryValueEx(hk, L"ExperimentalFPS", nullptr, &type, (BYTE*)&val, &sz) == ERROR_SUCCESS
+                && type == REG_DWORD && (int)val > 0 && (int)val <= 1000)
+            g_fpsTarget = (int)val;
+        RegCloseKey(hk);
+    }
+}
+static void SettingsSaveFpsTarget()
+{
+    HKEY hk = nullptr; DWORD disp;
+    if (RegCreateKeyEx(HKEY_CURRENT_USER, REG_SETTINGS_KEY,
+            0, nullptr, 0, KEY_WRITE, nullptr, &hk, &disp) == ERROR_SUCCESS) {
+        DWORD val = (DWORD)g_fpsTarget;
+        RegSetValueEx(hk, L"ExperimentalFPS", 0, REG_DWORD, (const BYTE*)&val, sizeof(val));
         RegCloseKey(hk);
     }
 }
@@ -843,6 +966,7 @@ static void ClearUserData()
     g_mruCount     = 0;
     g_toolsEnabled = false;
     g_toolsCount   = 0;
+    g_fpsTarget    = 0;
 
     g_currentLangCode[0] = L'\0';
     InitDefaultStrings();
@@ -988,8 +1112,28 @@ static void InitDefaultStrings()
     SetString("MSG_CLEARDATA_TITLE",   L"Clear User Data");
     SetString("MSG_CLEARDATA_CONFIRM",
         L"This clears your recent-file history and resets the Tools warning prompt "
-        L"(Tools will need to be re-enabled).\n\nContinue?");
+        "(Tools will need to be re-enabled).\n\nContinue?");
     SetString("MSG_CLEARDATA_DONE",    L"User data has been cleared.");
+
+    SetString("MENU_CTRL_EXPERIMENTAL", L"Experimental &Features...");
+    SetString("EXP_TITLE",              L"Experimental Features");
+    SetString("EXP_FPS_GROUP",          L"Frame Rate Override");
+    SetString("EXP_FPS_LABEL",          L"Target FPS:");
+    SetString("EXP_FPS_ZERO",           L"(0 = disabled)");
+    SetString("EXP_FPS_STATUS_ON",      L"Current setting: %d FPS");
+    SetString("EXP_FPS_STATUS_OFF",     L"Current setting: disabled (game default)");
+    SetString("EXP_FPS_HINT",
+        L"Forces the player to run at the given frame rate, ignoring the game's own "
+        "frame limiter and V-Sync setting. V-Sync stays disabled while this is "
+        "active, so mild screen tearing may occur. Targets above your monitor's "
+        "refresh rate are capped by it. Set 0 to disable. Changes usually apply "
+        "immediately; if a game keeps its old frame rate, reload the game.");
+    SetString("EXP_FPS_APPLY_BTN",      L"&Apply");
+    SetString("EXP_CLOSE_BTN",          L"Close");
+    SetString("EXP_FPS_BAD_VALUE",      L"Enter a value between 0 and 1000.");
+    SetString("EXP_FPS_SAVED",
+        L"Saved. Changes usually apply immediately; if not, reload the game "
+        L"(File > Reload).");
 }
 
 // Parse a single .lang file, optionally applying its keys to the string table.
@@ -1202,6 +1346,7 @@ static void ApplyMenuLanguage()
         }
         HMENU hLang = GetSubMenu(hCtrl, 1);
         if (hLang) ModifyMenu(hCtrl, 1, MF_BYPOSITION|MF_STRING|MF_POPUP, (UINT_PTR)hLang, LS("MENU_CTRL_LANGUAGE"));
+        ModifyMenu(hCtrl, IDM_CTRL_EXPERIMENTAL, MF_BYCOMMAND|MF_STRING, IDM_CTRL_EXPERIMENTAL, LS("MENU_CTRL_EXPERIMENTAL"));
     }
 
     if (hHelp) {
@@ -1233,10 +1378,9 @@ static void UnitySetPropW(const wchar_t*name,const wchar_t*value){
 static void UnityResize(int w,int h){
     if(!g_pIPO||w<=0||h<=0)return;RECT rc={0,0,w,h};g_pIPO->SetObjectRects(&rc,&rc);
 }
-// Remove existing runtime inline hooks using specific target addresses.
-// MH_RemoveHook(MH_ALL_HOOKS) is unreliable — concrete target guarantees removal.
-// NOTE: g_rtMonoStrNew is NOT cleared here — InstallRuntimeHooks assigns it
-// AFTER calling this, so clearing would wipe the new value.
+// Remove runtime inline hooks by concrete target address
+// (MH_RemoveHook(MH_ALL_HOOKS) is unreliable). Does not touch g_rtMonoStrNew:
+// InstallRuntimeHooks re-assigns it after calling this.
 static void RemoveExistingRtHooks(){
     if(g_rtHookTgtAbsURL){
         MH_DisableHook(g_rtHookTgtAbsURL);
@@ -1248,10 +1392,62 @@ static void RemoveExistingRtHooks(){
         MH_RemoveHook(g_rtHookTgtSrcVal);
         g_rtHookTgtSrcVal=nullptr;
     }
+    if(g_rtHookTgtGetFPS){
+        MH_DisableHook(g_rtHookTgtGetFPS);
+        MH_RemoveHook(g_rtHookTgtGetFPS);
+        g_rtHookTgtGetFPS=nullptr;
+    }
+    if(g_rtHookTgtLoop){
+        MH_DisableHook(g_rtHookTgtLoop);
+        MH_RemoveHook(g_rtHookTgtLoop);
+        g_rtHookTgtLoop=nullptr;
+    }
+    if(g_rtHookTgtSetTfr){
+        MH_DisableHook(g_rtHookTgtSetTfr);
+        MH_RemoveHook(g_rtHookTgtSetTfr);
+        g_rtHookTgtSetTfr=nullptr;
+    }
+    if(g_rtHookTgtSetVsy){
+        MH_DisableHook(g_rtHookTgtSetVsy);
+        MH_RemoveHook(g_rtHookTgtSetVsy);
+        g_rtHookTgtSetVsy=nullptr;
+    }
+    // Undo the D3D9/DXGI interception so a dying runtime (or anything still
+    // holding the device) never calls into freed trampoline code.
+    if(g_rtHookTgtD3D9){
+        MH_DisableHook(g_rtHookTgtD3D9);
+        MH_RemoveHook(g_rtHookTgtD3D9);
+        g_rtHookTgtD3D9=nullptr;
+    }
+    if(g_rtHookTgtDxgiF){
+        MH_DisableHook(g_rtHookTgtDxgiF);
+        MH_RemoveHook(g_rtHookTgtDxgiF);
+        g_rtHookTgtDxgiF=nullptr;
+    }
+    if(g_rtHookTgtDxgiF1){
+        MH_DisableHook(g_rtHookTgtDxgiF1);
+        MH_RemoveHook(g_rtHookTgtDxgiF1);
+        g_rtHookTgtDxgiF1=nullptr;
+    }
+    RestoreVtableSlot(g_scVtSlotPresent, reinterpret_cast<void*>(g_origSwapChainPresent));
+    RestoreVtableSlot(g_dxgiFtSlotCreateSwapChain, reinterpret_cast<void*>(g_origDxgiCreateSwapChain));
+    g_scVtSlotPresent=nullptr; g_dxgiFtSlotCreateSwapChain=nullptr;
+    g_origSwapChainPresent=nullptr; g_origDxgiCreateSwapChain=nullptr;
+    g_origCreateDxgiFactory=nullptr; g_origCreateDxgiFactory1=nullptr;
+    RestoreVtableSlot(g_devVtSlotPresent, reinterpret_cast<void*>(g_origD3DPresent));
+    RestoreVtableSlot(g_devVtSlotReset,   reinterpret_cast<void*>(g_origD3DReset));
+    RestoreVtableSlot(g_d3d9VtSlotCreate, reinterpret_cast<void*>(g_origD3DCreateDevice));
+    g_devVtSlotPresent=nullptr; g_devVtSlotReset=nullptr; g_d3d9VtSlotCreate=nullptr;
+    g_origD3DPresent=nullptr; g_origD3DReset=nullptr; g_origD3DCreateDevice=nullptr;
+    g_origD3DCreate9=nullptr;
     g_rtHookAbsURL=nullptr;
     g_rtHookSrcVal=nullptr;
     g_origAbsURL=nullptr;
     g_origSrcVal=nullptr;
+    g_rtOrigGetFPS=nullptr;
+    g_rtOrigLoop=nullptr;
+    g_rtOrigSetTfr=nullptr;
+    g_rtOrigSetVsy=nullptr;
 }
 static void UnityDestroy(){
     // Stop the hook-install timer (if still polling) before tearing down.
@@ -1261,9 +1457,7 @@ static void UnityDestroy(){
     if(g_pDisp){g_pDisp->Release();g_pDisp=nullptr;}
     if(g_pOleObj){g_pOleObj->Close(OLECLOSE_NOSAVE);g_pOleObj->Release();g_pOleObj=nullptr;}
     if(g_pSite){g_pSite->Release();g_pSite=nullptr;}
-    // Disable any runtime inline hooks before the runtime DLL gets unloaded by
-    // CoFreeUnusedLibrariesEx; otherwise the patched bytes would point into
-    // freed memory. The next UnityCreate cycle re-installs them if needed.
+    // Disable hooks before the runtime DLL is unloaded by CoFreeUnusedLibrariesEx.
     if(g_rtHookTried){
         RemoveExistingRtHooks();
         g_rtHookTried=false;
@@ -1272,21 +1466,40 @@ static void UnityDestroy(){
     if(g_hwndMain)InvalidateRect(g_hwndMain,nullptr,TRUE);
 }
 static bool UnityCreate(HWND hwnd,const wchar_t*srcUrl){
-    g_pSite=new UnityClientSite(hwnd);
+    // Local path -> file:// URL: the WWW class resolves relative bundle paths
+    // against this base URL (multi-bundle games).
+    wchar_t fileUrl[MAX_PATH*2]={};
+    if(PathIsURL(srcUrl)!=TRUE){
+        // srcUrl is a bare Windows path like D:\...\main.unity3d
+        wcscpy(fileUrl,L"file:///");
+        size_t pos=8; // len("file:///")
+        for(const wchar_t*p=srcUrl;*p&&pos<(MAX_PATH*2)-1;p++){
+            fileUrl[pos++]=(*p==L'\\')?L'/':*p;
+        }
+        fileUrl[pos]=L'\0';
+    }else{
+        wcsncpy(fileUrl,srcUrl,(MAX_PATH*2)-1);
+        fileUrl[(MAX_PATH*2)-1]=L'\0';
+    }
+
+    // Store for OCX URL-resolve hook fallback (multi-bundle games).
+    wcsncpy(g_gameFileUrl,fileUrl,_countof(g_gameFileUrl)-1);
+    g_gameFileUrl[_countof(g_gameFileUrl)-1]=L'\0';
+
+    g_pSite=new UnityClientSite(hwnd,fileUrl);
     HRESULT hr=CoCreateInstance(CLSID_UnityWebPlayer,nullptr,CLSCTX_INPROC_SERVER,
                                 IID_IOleObject,(void**)&g_pOleObj);
     if(FAILED(hr)){g_pSite->Release();g_pSite=nullptr;return false;}
     g_pOleObj->SetClientSite(g_pSite);OleSetContainedObject(g_pOleObj,TRUE);
     g_pOleObj->QueryInterface(IID_IDispatch,(void**)&g_pDisp);
 
-    // CoCreateInstance loaded the OCX; patch its IAT now so its src bind uses
-    // our Referer-injecting wrapper. Idempotent.
+    // CoCreateInstance just loaded the OCX — patch all three hooks now.
     InstallOcxRefererHook();
-    // Also patch LoadLibraryW so we catch the async webplayer_win.dll load
-    // the instant it happens (before game scripts run anti-piracy checks).
     InstallOcxLoadLibraryHook();
+    InstallOcxUrlResolveHook();
 
-    UnitySetPropW(L"src",srcUrl);
+    // src must be a URL, not a bare path (see fileUrl above).
+    UnitySetPropW(L"src",fileUrl);
     UnitySetPropW(L"backgroundcolor",L"000000");
     UnitySetPropW(L"bordercolor",L"000000");
     UnitySetPropW(L"disableContextMenu",L"false");
@@ -1366,24 +1579,151 @@ static void InstallOcxRefererHook(){
     }
 }
 
-// Hook LoadLibraryW in the OCX so runtime hooks install the instant
-// webplayer_win.dll loads — before game scripts can read absoluteURL.
+// LoadLibrary detours: install runtime hooks the moment webplayer_win.dll
+// loads (the engine creates its D3D device milliseconds later — the 200 ms
+// install timer would be far too late). All four variants are hooked because
+// modules in the load chain import different ones.
+static bool RtHookCheckName(const wchar_t* wideName)
+{
+    if (!wideName) return false;
+    const wchar_t* base = wcsrchr(wideName, L'\\');
+    if (!base) base = wideName; else base++;
+    return _wcsicmp(base, L"webplayer_win.dll") == 0;
+}
+static void RtHookOnRuntimeLoaded()
+{
+    g_rtHookTried = false;
+    InstallRuntimeHooks();
+}
 static HMODULE WINAPI HookedLoadLibraryW(LPCWSTR libFileName)
 {
-    HMODULE h = g_origLoadLibraryW ? g_origLoadLibraryW(libFileName) : ::LoadLibraryW(libFileName);
-    if (libFileName) {
-        const wchar_t* base = wcsrchr(libFileName, L'\\');
-        if (!base) base = libFileName; else base++;
-        if (_wcsicmp(base, L"webplayer_win.dll") == 0) {
-            g_rtHookTried = false;
-            InstallRuntimeHooks();
-        }
+    HMODULE h = g_origLoadLibraryW ? g_origLoadLibraryW(libFileName) : nullptr;
+    if (h && RtHookCheckName(libFileName))
+        RtHookOnRuntimeLoaded();
+    return h;
+}
+static HMODULE WINAPI HookedLoadLibraryExW(LPCWSTR libFileName, HANDLE file, DWORD flags)
+{
+    typedef HMODULE (WINAPI *Fn)(LPCWSTR, HANDLE, DWORD);
+    Fn orig = reinterpret_cast<Fn>(g_origLoadLibraryExW);
+    HMODULE h = orig ? orig(libFileName, file, flags) : nullptr;
+    if (h && RtHookCheckName(libFileName))
+        RtHookOnRuntimeLoaded();
+    return h;
+}
+static HMODULE WINAPI HookedLoadLibraryA(LPCSTR libFileName)
+{
+    typedef HMODULE (WINAPI *Fn)(LPCSTR);
+    Fn orig = reinterpret_cast<Fn>(g_origLoadLibraryA);
+    HMODULE h = orig ? orig(libFileName) : nullptr;
+    if (h && libFileName) {
+        wchar_t wide[MAX_PATH];
+        MultiByteToWideChar(CP_ACP, 0, libFileName, -1, wide, MAX_PATH);
+        if (RtHookCheckName(wide))
+            RtHookOnRuntimeLoaded();
+    }
+    return h;
+}
+static HMODULE WINAPI HookedLoadLibraryExA(LPCSTR libFileName, HANDLE file, DWORD flags)
+{
+    typedef HMODULE (WINAPI *Fn)(LPCSTR, HANDLE, DWORD);
+    Fn orig = reinterpret_cast<Fn>(g_origLoadLibraryExA);
+    HMODULE h = orig ? orig(libFileName, file, flags) : nullptr;
+    if (h && libFileName) {
+        wchar_t wide[MAX_PATH];
+        MultiByteToWideChar(CP_ACP, 0, libFileName, -1, wide, MAX_PATH);
+        if (RtHookCheckName(wide))
+            RtHookOnRuntimeLoaded();
     }
     return h;
 }
 
-// Patch OCX IAT: kernel32!LoadLibraryW -> HookedLoadLibraryW.
+// Process-wide inline hooks on the kernel32 LoadLibrary variants.
+// webplayer_win.dll is loaded by npUnity3D32.dll (not the OCX), whose IAT we
+// cannot reach — hooking the function bodies catches the load regardless of
+// which module initiates it.
 static void InstallOcxLoadLibraryHook()
+{
+    static bool installed = false;
+    if (installed) return;
+
+    HMODULE hK32 = GetModuleHandleW(L"kernel32.dll");
+    if (!hK32) return;
+
+    MH_STATUS s = MH_Initialize();
+    if (s != MH_OK && s != MH_ERROR_ALREADY_INITIALIZED) return;
+
+    struct { const char* name; void* hook; void** orig; } entries[] = {
+        { "LoadLibraryW",   reinterpret_cast<void*>(&HookedLoadLibraryW),   reinterpret_cast<void**>(&g_origLoadLibraryW) },
+        { "LoadLibraryExW", reinterpret_cast<void*>(&HookedLoadLibraryExW), reinterpret_cast<void**>(&g_origLoadLibraryExW) },
+        { "LoadLibraryA",   reinterpret_cast<void*>(&HookedLoadLibraryA),   reinterpret_cast<void**>(&g_origLoadLibraryA) },
+        { "LoadLibraryExA", reinterpret_cast<void*>(&HookedLoadLibraryExA), reinterpret_cast<void**>(&g_origLoadLibraryExA) },
+    };
+    int okCount = 0;
+    for (int i = 0; i < 4; i++) {
+        void* p = reinterpret_cast<void*>(GetProcAddress(hK32, entries[i].name));
+        if (!p) continue;
+        MH_STATUS sc = MH_CreateHook(p, entries[i].hook, entries[i].orig);
+        if (sc == MH_ERROR_ALREADY_CREATED) {
+            MH_RemoveHook(p);
+            sc = MH_CreateHook(p, entries[i].hook, entries[i].orig);
+        }
+        if (sc == MH_OK && MH_EnableHook(p) == MH_OK)
+            okCount++;
+    }
+    installed = (okCount > 0);
+}
+
+// ---------------------------------------------------------------------------
+// OCX IAT hook: urlmon!CreateURLMonikerEx. WWW downloads with relative URLs
+// ("Shared/Shared.unity3d") have no page URL to resolve against when we host
+// the OCX directly — combine them with the game's own file:// URL instead.
+// ---------------------------------------------------------------------------
+typedef HRESULT (WINAPI *CreateURLMonikerExFn)(LPMONIKER, LPCWSTR, LPMONIKER*, DWORD);
+static CreateURLMonikerExFn g_origCreateURLMonikerEx = nullptr;
+
+// Does the string start with a URL scheme (" ALPHA *( ALPHA / DIGIT / + - . ) :" )?
+static bool WstrHasScheme(const wchar_t* s)
+{
+    if (!s || !*s) return false;
+    const wchar_t* p = s;
+    if (!(*p >= L'a' && *p <= L'z') && !(*p >= L'A' && *p <= L'Z')) return false;
+    for (p++; *p; p++) {
+        if (*p == L':') return true;
+        if (!(*p >= L'a' && *p <= L'z') && !(*p >= L'A' && *p <= L'Z') &&
+            !(*p >= L'0' && *p <= L'9') && *p != L'+' && *p != L'-' && *p != L'.')
+            return false;
+    }
+    return false;
+}
+
+static HRESULT WINAPI HookedCreateURLMonikerEx(LPMONIKER pmkContext, LPCWSTR szURL,
+                                               LPMONIKER* ppmk, DWORD dwFlags)
+{
+    wchar_t absBuf[MAX_PATH * 4];
+
+    if (!pmkContext && szURL && g_gameFileUrl[0] && !WstrHasScheme(szURL)) {
+        // Lazily resolve CoInternetCombineUrl from urlmon.dll.
+        if (!g_pCoInternetCombineUrl) {
+            HMODULE hUm = GetModuleHandleW(L"urlmon.dll");
+            if (hUm)
+                g_pCoInternetCombineUrl = reinterpret_cast<CoInternetCombineUrlFn>(
+                    GetProcAddress(hUm, "CoInternetCombineUrl"));
+        }
+        if (g_pCoInternetCombineUrl) {
+            DWORD cch = _countof(absBuf);
+            HRESULT hr = g_pCoInternetCombineUrl(g_gameFileUrl, szURL, 0,
+                                                 absBuf, cch, &cch, 0);
+            if (SUCCEEDED(hr))
+                szURL = absBuf;
+        }
+    }
+    return g_origCreateURLMonikerEx(pmkContext, szURL, ppmk, dwFlags);
+}
+
+// Patch OCX IAT: urlmon!CreateURLMonikerEx -> HookedCreateURLMonikerEx.
+// Idempotent — skips if already patched.
+static void InstallOcxUrlResolveHook()
 {
     HMODULE hOcx = GetModuleHandleW(L"UnityWebPluginAX.ocx");
     if (!hOcx) return;
@@ -1400,8 +1740,7 @@ static void InstallOcxLoadLibraryHook()
     IMAGE_IMPORT_DESCRIPTOR* desc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + impDir->VirtualAddress);
     for (; desc->Name; desc++) {
         const char* modName = reinterpret_cast<const char*>(base + desc->Name);
-        // The OCX imports LoadLibraryW from kernel32.dll (or possibly kernelbase).
-        if (_stricmp(modName, "kernel32.dll") != 0) continue;
+        if (_stricmp(modName, "urlmon.dll") != 0) continue;
 
         IMAGE_THUNK_DATA* thunk = reinterpret_cast<IMAGE_THUNK_DATA*>(base + desc->FirstThunk);
         IMAGE_THUNK_DATA* origThunk = desc->OriginalFirstThunk
@@ -1410,16 +1749,17 @@ static void InstallOcxLoadLibraryHook()
         for (; origThunk->u1.AddressOfData; origThunk++, thunk++) {
             if (IMAGE_SNAP_BY_ORDINAL(origThunk->u1.Ordinal)) continue;
             IMAGE_IMPORT_BY_NAME* ibn = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(base + origThunk->u1.AddressOfData);
-            if (strcmp(reinterpret_cast<const char*>(ibn->Name), "LoadLibraryW") != 0) continue;
+            if (strcmp(reinterpret_cast<const char*>(ibn->Name), "CreateURLMonikerEx") != 0) continue;
 
             void* slot = &thunk->u1.Function;
             FARPROC current = reinterpret_cast<FARPROC>(thunk->u1.Function);
-            if (current == reinterpret_cast<FARPROC>(&HookedLoadLibraryW)) return;  // already patched
+            // Already patched (OCX still loaded from last UnityCreate)? Nothing to do.
+            if (current == reinterpret_cast<FARPROC>(&HookedCreateURLMonikerEx)) return;
 
             DWORD oldProt = 0;
             if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &oldProt)) return;
-            g_origLoadLibraryW = reinterpret_cast<HMODULE(WINAPI*)(LPCWSTR)>(current);
-            thunk->u1.Function = reinterpret_cast<ULONG_PTR>(&HookedLoadLibraryW);
+            g_origCreateURLMonikerEx = reinterpret_cast<CreateURLMonikerExFn>(current);
+            thunk->u1.Function = reinterpret_cast<ULONG_PTR>(&HookedCreateURLMonikerEx);
             VirtualProtect(slot, sizeof(void*), oldProt, &oldProt);
             return;
         }
@@ -1603,41 +1943,261 @@ static void* __cdecl HookedGetSrcValue()
     return origRet;
 }
 
-// Build the spoofed URL string from g_currentReferer + the loaded file's name.
-//   https://www.4399.com/  +  trn2.unity3d  ->  https://www.4399.com/trn2.unity3d
-// For URL games we leave g_spoofedUrl empty (no spoof -> original behaviour).
+// ---------------------------------------------------------------------------
+//  Experimental frame-rate override: detours
+// ---------------------------------------------------------------------------
+
+typedef int (__cdecl *FpsGetterFn)();
+typedef int (__cdecl *FpsSetterFn)(int);
+typedef int (__cdecl *FpsLoopFn)();
+
+// UnityWinWebLoop: counts completed pumps. The FPS force must not run before
+// the first one — set_vSyncCount dereferences the graphics device (created
+// inside the first call) with no null check, and the loader queries the FPS
+// one tick BEFORE that call.
+static int __cdecl HookedUnityWinWebLoop()
+{
+    FpsLoopFn orig = reinterpret_cast<FpsLoopFn>(g_rtOrigLoop);
+    int r = orig ? orig() : 0;
+    g_rtLoopCalls++;
+    return r;
+}
+
+// UnityGetPlayerTargetFPS: the loader queries this after each pump, making it
+// the perfect re-apply point — whatever the game wrote into its quality
+// settings during the frame gets reverted one tick later at most. The icall
+// wrappers no-op on unchanged values and run on the pump thread, so the
+// per-query re-apply is cheap and race-free.
+static int __cdecl HookedGetPlayerTargetFPS()
+{
+    if (g_fpsTarget > 0) {
+        if (g_rtLoopCalls > 0) {
+            FpsSetterFn setVsy = reinterpret_cast<FpsSetterFn>(g_rtOrigSetVsy);
+            FpsSetterFn setTfr = reinterpret_cast<FpsSetterFn>(g_rtOrigSetTfr);
+            if (setVsy) setVsy(0);                        // clear game's vSync cap
+            if (setTfr) setTfr(ENGINE_TFR_ACTIVE);        // engine never self-throttles
+            if ((InterlockedIncrement(&g_fpsQueryCount) % 60) == 0)
+                FpsAdaptiveStep();
+        }
+        return g_reportFps;
+    }
+    FpsGetterFn orig = reinterpret_cast<FpsGetterFn>(g_rtOrigGetFPS);
+    return orig ? orig() : 60;
+}
+
+// set_targetFrameRate icall — pin HIGH while active (loader timer paces).
+static int __cdecl HookedSetTargetFrameRate(int fps)
+{
+    FpsSetterFn orig = reinterpret_cast<FpsSetterFn>(g_rtOrigSetTfr);
+    return orig ? orig(g_fpsTarget > 0 ? ENGINE_TFR_ACTIVE : fps) : fps;
+}
+
+// set_vSyncCount icall — force 0 while active.
+static int __cdecl HookedSetVSyncCount(int count)
+{
+    FpsSetterFn orig = reinterpret_cast<FpsSetterFn>(g_rtOrigSetVsy);
+    return orig ? orig(g_fpsTarget > 0 ? 0 : count) : count;
+}
+
+// ---------------------------------------------------------------------------
+//  Experimental frame-rate override: D3D9 interception
+// ---------------------------------------------------------------------------
+
+// IMMEDIATE: the engine's internal frame wait already CPU-waits for each
+// slot; a vblank-synced Present would serialize with it and halve the rate.
+// Tearing is the trade-off.
+static DWORD FpsOverridePresentInterval()
+{
+    return D3DPRESENT_INTERVAL_IMMEDIATE;
+}
+
+// Write a hook pointer into a (read-only) COM vtable slot. Idempotent.
+static bool PatchVtableSlot(void** slot, void* hookFn, void** savedOrig)
+{
+    if (!slot) return false;
+    if (*slot == hookFn) return true;          // already ours
+    DWORD oldProt = 0;
+    if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &oldProt))
+        return false;
+    *savedOrig = *slot;
+    *slot = hookFn;
+    VirtualProtect(slot, sizeof(void*), oldProt, &oldProt);
+    return true;
+}
+static void RestoreVtableSlot(void** slot, void* savedOrig)
+{
+    if (!slot || !savedOrig) return;
+    DWORD oldProt = 0;
+    if (VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &oldProt)) {
+        *slot = savedOrig;
+        VirtualProtect(slot, sizeof(void*), oldProt, &oldProt);
+    }
+}
+
+// IDirect3DDevice9::Present — pass-through.
+static HRESULT WINAPI HookedD3D9Present(IDirect3DDevice9* dev, const RECT* src,
+                                        const RECT* dst, HWND wnd, const RGNDATA* dirty)
+{
+    return g_origD3DPresent ? g_origD3DPresent(dev, src, dst, wnd, dirty) : E_FAIL;
+}
+
+// Reset — re-force the interval (fullscreen toggles / resizes go through here).
+static HRESULT WINAPI HookedD3D9Reset(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS* pp)
+{
+    if (pp && g_fpsTarget > 0)
+        pp->PresentationInterval = FpsOverridePresentInterval();
+    return g_origD3DReset ? g_origD3DReset(dev, pp) : E_FAIL;
+}
+
+// CreateDevice — force the interval, patch the device vtable (Reset + Present).
+static HRESULT WINAPI HookedD3D9CreateDevice(IDirect3D9* d3d, UINT adapter,
+                                             D3DDEVTYPE type, HWND hwnd, DWORD flags,
+                                             D3DPRESENT_PARAMETERS* pp,
+                                             IDirect3DDevice9** out)
+{
+    if (pp && g_fpsTarget > 0)
+        pp->PresentationInterval = FpsOverridePresentInterval();
+    HRESULT hr = g_origD3DCreateDevice
+        ? g_origD3DCreateDevice(d3d, adapter, type, hwnd, flags, pp, out)
+        : E_FAIL;
+    if (SUCCEEDED(hr) && out && *out) {
+        void** vt = *reinterpret_cast<void***>(*out);
+        if (PatchVtableSlot(&vt[16], reinterpret_cast<void*>(&HookedD3D9Reset),
+                            reinterpret_cast<void**>(&g_origD3DReset)))
+            g_devVtSlotReset = &vt[16];
+        if (PatchVtableSlot(&vt[17], reinterpret_cast<void*>(&HookedD3D9Present),
+                            reinterpret_cast<void**>(&g_origD3DPresent)))
+            g_devVtSlotPresent = &vt[17];
+    }
+    return hr;
+}
+
+// Direct3DCreate9 — patch the returned object's CreateDevice vtable entry.
+static IDirect3D9* WINAPI HookedDirect3DCreate9(UINT sdkVersion)
+{
+    IDirect3D9* d3d = g_origD3DCreate9 ? g_origD3DCreate9(sdkVersion) : nullptr;
+    if (d3d && g_fpsTarget > 0) {
+        void** vt = *reinterpret_cast<void***>(d3d);
+        if (PatchVtableSlot(&vt[16], reinterpret_cast<void*>(&HookedD3D9CreateDevice),
+                            reinterpret_cast<void**>(&g_origD3DCreateDevice)))
+            g_d3d9VtSlotCreate = &vt[16];
+    }
+    return d3d;
+}
+
+// ---------------------------------------------------------------------------
+//  DXGI hooks (D3D11 path)
+// ---------------------------------------------------------------------------
+
+// Sync interval 0 (immediate) — same rationale as the D3D9 interval above.
+static UINT FpsOverrideSyncInterval()
+{
+    return 0u;
+}
+
+// IDXGISwapChain::Present — force the sync interval.
+static HRESULT WINAPI HookedSwapChainPresent(IDXGISwapChain* sc, UINT SyncInterval,
+                                             UINT Flags)
+{
+    if (g_fpsTarget > 0)
+        SyncInterval = FpsOverrideSyncInterval();
+    return g_origSwapChainPresent ? g_origSwapChainPresent(sc, SyncInterval, Flags)
+                                  : E_FAIL;
+}
+
+// CreateSwapChainForHwnd — patch the returned swap chain's Present.
+static HRESULT WINAPI HookedDxgiCreateSwapChainForHwnd(
+    void* factory, IUnknown* device, HWND hwnd,
+    const void* desc, const void* fullscreenDesc,
+    IDXGIOutput* restrictToOutput, IDXGISwapChain1** out)
+{
+    DxgiCreateSwapChainForHwndFn orig =
+        reinterpret_cast<DxgiCreateSwapChainForHwndFn>(g_origDxgiCreateSwapChain);
+    HRESULT hr = orig
+        ? orig(factory, device, hwnd, desc, fullscreenDesc,
+               restrictToOutput, out)
+        : E_FAIL;
+    if (SUCCEEDED(hr) && out && *out) {
+        void** vt = *reinterpret_cast<void***>(*out);
+        if (PatchVtableSlot(&vt[8], reinterpret_cast<void*>(&HookedSwapChainPresent),
+                            reinterpret_cast<void**>(&g_origSwapChainPresent)))
+            g_scVtSlotPresent = &vt[8];
+    }
+    return hr;
+}
+
+static void PatchDxgiFactoryVtable(void* factory)
+{
+    void** vt = *reinterpret_cast<void***>(factory);
+    if (PatchVtableSlot(&vt[15], reinterpret_cast<void*>(&HookedDxgiCreateSwapChainForHwnd),
+                        reinterpret_cast<void**>(&g_origDxgiCreateSwapChain)))
+        g_dxgiFtSlotCreateSwapChain = &vt[15];
+}
+
+// dxgi.dll!CreateDXGIFactory / CreateDXGIFactory1
+static HRESULT WINAPI HookedCreateDxgiFactory(REFIID riid, void** ppFactory)
+{
+    HRESULT hr = g_origCreateDxgiFactory
+        ? g_origCreateDxgiFactory(riid, ppFactory) : E_FAIL;
+    if (SUCCEEDED(hr) && ppFactory && *ppFactory)
+        PatchDxgiFactoryVtable(*ppFactory);
+    return hr;
+}
+static HRESULT WINAPI HookedCreateDxgiFactory1(REFIID riid, void** ppFactory)
+{
+    HRESULT hr = g_origCreateDxgiFactory1
+        ? g_origCreateDxgiFactory1(riid, ppFactory) : E_FAIL;
+    if (SUCCEEDED(hr) && ppFactory && *ppFactory)
+        PatchDxgiFactoryVtable(*ppFactory);
+    return hr;
+}
+
+// Spoofed URL = referer host + file name, e.g.
+//   https://www.4399.com/ + trn2.unity3d -> https://www.4399.com/trn2.unity3d
+// Empty for URL games (no spoof).
 static void BuildSpoofedUrl(const wchar_t* path, const wchar_t* referer)
 {
     g_spoofedUrl[0] = '\0';
-    if (!path || !path[0] || !referer || !referer[0]) return;
-    // Only spoof for local files. URL games already report a real URL.
-    if (PathIsURL(path) == TRUE) return;
 
-    // Extract host from referer: find "://" then take up to next '/'.
-    const wchar_t* p = wcsstr(referer, L"://");
-    if (!p) p = referer; else p += 3;
-    wchar_t host[256] = {};
-    size_t i = 0;
-    while (*p && *p != L'/' && *p != L'?' && *p != L'#' && i < 255) host[i++] = *p++;
-    host[i] = L'\0';
-    if (!host[0]) return;
+    // With a referer: build an https:// URL from its host.
+    if (path && path[0] && referer && referer[0] && PathIsURL(path) != TRUE) {
+        const wchar_t* p = wcsstr(referer, L"://");
+        if (!p) p = referer; else p += 3;
+        wchar_t host[256] = {};
+        size_t i = 0;
+        while (*p && *p != L'/' && *p != L'?' && *p != L'#' && i < 255) host[i++] = *p++;
+        host[i] = L'\0';
+        if (host[0]) {
+            // Extract filename from path.
+            const wchar_t* fn = wcsrchr(path, L'\\');
+            const wchar_t* fn2 = wcsrchr(path, L'/');
+            if (fn2 > fn) fn = fn2;
+            fn = fn ? fn + 1 : path;
+            if (fn[0]) {
+                wchar_t urlW[1024];
+                _snwprintf(urlW, 1023, L"https://%s/%s", host, fn);
+                urlW[1023] = L'\0';
+                WideCharToMultiByte(CP_UTF8, 0, urlW, -1, g_spoofedUrl, sizeof(g_spoofedUrl), nullptr, nullptr);
+                g_spoofedUrl[sizeof(g_spoofedUrl) - 1] = '\0';
+            }
+        }
+    }
 
-    // Extract filename from path.
-    const wchar_t* fn = wcsrchr(path, L'\\');
-    const wchar_t* fn2 = wcsrchr(path, L'/');
-    if (fn2 > fn) fn = fn2;
-    fn = fn ? fn + 1 : path;
-    if (!fn[0]) return;
-
-    // Compose "https://<host>/<filename>" as UTF-8.
-    wchar_t urlW[1024];
-    _snwprintf(urlW, 1023, L"https://%s/%s", host, fn);
-    urlW[1023] = L'\0';
-    WideCharToMultiByte(CP_UTF8, 0, urlW, -1, g_spoofedUrl, sizeof(g_spoofedUrl), nullptr, nullptr);
-    g_spoofedUrl[sizeof(g_spoofedUrl) - 1] = '\0';
+    // Without a referer: use the file:// URL (WWW relative-path base).
+    if (!g_spoofedUrl[0] && path && path[0] && PathIsURL(path) != TRUE) {
+        wchar_t fileUrl[MAX_PATH * 2] = {};
+        wcscpy(fileUrl, L"file:///");
+        size_t pos = 8;
+        for (const wchar_t* p = path; *p && pos < _countof(fileUrl) - 1; p++)
+            fileUrl[pos++] = (*p == L'\\') ? L'/' : *p;
+        fileUrl[pos] = L'\0';
+        WideCharToMultiByte(CP_UTF8, 0, fileUrl, -1, g_spoofedUrl, sizeof(g_spoofedUrl), nullptr, nullptr);
+        g_spoofedUrl[sizeof(g_spoofedUrl) - 1] = '\0';
+    }
 }
 
-// Install runtime inline hooks on get_absoluteURL/get_srcValue.
+// Install runtime inline hooks on get_absoluteURL/get_srcValue, plus the
+// experimental frame-rate override when g_fpsTarget > 0.
 // Idempotent per UnityCreate cycle; g_rtHookTried resets in UnityDestroy.
 static bool InstallRuntimeHooks()
 {
@@ -1646,6 +2206,7 @@ static bool InstallRuntimeHooks()
     HMODULE hRt = GetModuleHandleW(L"webplayer_win.dll");
     if (!hRt) return false;  // not loaded yet — timer retries; don't set tried
     g_rtHookTried = true;
+    g_rtLoopCalls = 0;       // engine has not pumped any frame yet
 
     void* pAbsURL = FindIcallImpl(hRt, "UnityEngine.Application::get_absoluteURL");
     void* pSrcVal = FindIcallImpl(hRt, "UnityEngine.Application::get_srcValue");
@@ -1657,7 +2218,10 @@ static bool InstallRuntimeHooks()
 
     static bool mhInited = false;
     if (!mhInited) {
-        if (MH_Initialize() != MH_OK) return false;
+        // OCX URL hook may have initialised MinHook already — that's fine.
+        MH_STATUS s = MH_Initialize();
+        if (s != MH_OK && s != MH_ERROR_ALREADY_INITIALIZED)
+            return false;
         mhInited = true;
     }
 
@@ -1682,6 +2246,155 @@ static bool InstallRuntimeHooks()
     }
     if (s2 != MH_OK) { RemoveExistingRtHooks(); return false; }
     g_rtHookTgtSrcVal = pSrcVal;
+
+    // ---- Experimental: frame-rate override (g_fpsTarget from registry) ----
+    // Hooks are optional: a missing symbol (very old runtimes) only disables
+    // the feature, never the URL spoofing above.
+    if (g_fpsTarget > 0) {
+        g_fpsQueryCount = 0;
+        if (!g_qpcFreq.QuadPart)
+            QueryPerformanceFrequency(&g_qpcFreq);
+        // Adaptive compensation init: assume the floor is one monitor refresh
+        // period; the EMA corrects this within a couple of seconds of play.
+        {
+            DEVMODE dm = {};
+            dm.dmSize = sizeof(dm);
+            if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm) &&
+                dm.dmDisplayFrequency >= 30 && dm.dmDisplayFrequency <= 1000)
+                g_monitorRefreshHz = dm.dmDisplayFrequency;
+            g_baseTickMs = 1000.0 / g_monitorRefreshHz;
+            g_reportFps = ComputeReportFpsFor(g_baseTickMs);
+            QueryPerformanceCounter(&g_windowStart);
+        }
+
+        // D3D9/DXGI interception — hooking the export bodies, since the
+        // runtimes' GetProcAddress is a delay-load import (IAT patches get
+        // wiped on first call). Pre-loading the DLLs is harmless.
+        {
+            HMODULE hD3d9 = GetModuleHandleW(L"d3d9.dll");
+            if (!hD3d9) hD3d9 = LoadLibraryW(L"d3d9.dll");
+            if (hD3d9) {
+                void* pCreate9 = reinterpret_cast<void*>(GetProcAddress(hD3d9, "Direct3DCreate9"));
+                if (pCreate9) {
+                    MH_STATUS sd = MH_CreateHook(pCreate9,
+                                                 reinterpret_cast<void*>(&HookedDirect3DCreate9),
+                                                 reinterpret_cast<void**>(&g_origD3DCreate9));
+                    if (sd == MH_ERROR_ALREADY_CREATED) {
+                        MH_RemoveHook(pCreate9);
+                        sd = MH_CreateHook(pCreate9,
+                                           reinterpret_cast<void*>(&HookedDirect3DCreate9),
+                                           reinterpret_cast<void**>(&g_origD3DCreate9));
+                    }
+                    if (sd == MH_OK)
+                        g_rtHookTgtD3D9 = pCreate9;
+                }
+            }
+        }
+
+        // DXGI factory exports (D3D11 path).
+        {
+            HMODULE hDxgi = GetModuleHandleW(L"dxgi.dll");
+            if (!hDxgi) hDxgi = LoadLibraryW(L"dxgi.dll");
+            if (hDxgi) {
+                void* pF  = reinterpret_cast<void*>(GetProcAddress(hDxgi, "CreateDXGIFactory"));
+                void* pF1 = reinterpret_cast<void*>(GetProcAddress(hDxgi, "CreateDXGIFactory1"));
+                if (pF) {
+                    MH_STATUS sx = MH_CreateHook(pF,
+                                                 reinterpret_cast<void*>(&HookedCreateDxgiFactory),
+                                                 reinterpret_cast<void**>(&g_origCreateDxgiFactory));
+                    if (sx == MH_ERROR_ALREADY_CREATED) {
+                        MH_RemoveHook(pF);
+                        sx = MH_CreateHook(pF,
+                                           reinterpret_cast<void*>(&HookedCreateDxgiFactory),
+                                           reinterpret_cast<void**>(&g_origCreateDxgiFactory));
+                    }
+                    if (sx == MH_OK)
+                        g_rtHookTgtDxgiF = pF;
+                }
+                if (pF1) {
+                    MH_STATUS sx = MH_CreateHook(pF1,
+                                                 reinterpret_cast<void*>(&HookedCreateDxgiFactory1),
+                                                 reinterpret_cast<void**>(&g_origCreateDxgiFactory1));
+                    if (sx == MH_ERROR_ALREADY_CREATED) {
+                        MH_RemoveHook(pF1);
+                        sx = MH_CreateHook(pF1,
+                                           reinterpret_cast<void*>(&HookedCreateDxgiFactory1),
+                                           reinterpret_cast<void**>(&g_origCreateDxgiFactory1));
+                    }
+                    if (sx == MH_OK)
+                        g_rtHookTgtDxgiF1 = pF1;
+                }
+            }
+        }
+
+        void* pGetFPS = reinterpret_cast<void*>(GetProcAddress(hRt, "UnityGetPlayerTargetFPS"));
+        void* pLoop   = reinterpret_cast<void*>(GetProcAddress(hRt, "UnityWinWebLoop"));
+        void* pSetTfr = FindIcallImpl(hRt, "UnityEngine.Application::set_targetFrameRate");
+        void* pSetVsy = FindIcallImpl(hRt, "UnityEngine.QualitySettings::set_vSyncCount");
+
+        if (pGetFPS && pLoop && pSetTfr && pSetVsy) {
+            MH_STATUS sf = MH_CreateHook(pGetFPS, reinterpret_cast<void*>(&HookedGetPlayerTargetFPS),
+                                         reinterpret_cast<void**>(&g_rtOrigGetFPS));
+            if (sf == MH_ERROR_ALREADY_CREATED) {
+                MH_RemoveHook(pGetFPS);
+                sf = MH_CreateHook(pGetFPS, reinterpret_cast<void*>(&HookedGetPlayerTargetFPS),
+                                   reinterpret_cast<void**>(&g_rtOrigGetFPS));
+            }
+            if (sf == MH_OK) {
+                g_rtHookTgtGetFPS = pGetFPS;
+
+                sf = MH_CreateHook(pLoop, reinterpret_cast<void*>(&HookedUnityWinWebLoop),
+                                   reinterpret_cast<void**>(&g_rtOrigLoop));
+                if (sf == MH_ERROR_ALREADY_CREATED) {
+                    MH_RemoveHook(pLoop);
+                    sf = MH_CreateHook(pLoop, reinterpret_cast<void*>(&HookedUnityWinWebLoop),
+                                       reinterpret_cast<void**>(&g_rtOrigLoop));
+                }
+                if (sf == MH_OK) {
+                    g_rtHookTgtLoop = pLoop;
+
+                    sf = MH_CreateHook(pSetTfr, reinterpret_cast<void*>(&HookedSetTargetFrameRate),
+                                       reinterpret_cast<void**>(&g_rtOrigSetTfr));
+                    if (sf == MH_ERROR_ALREADY_CREATED) {
+                        MH_RemoveHook(pSetTfr);
+                        sf = MH_CreateHook(pSetTfr, reinterpret_cast<void*>(&HookedSetTargetFrameRate),
+                                           reinterpret_cast<void**>(&g_rtOrigSetTfr));
+                    }
+                    if (sf == MH_OK) {
+                        g_rtHookTgtSetTfr = pSetTfr;
+
+                        sf = MH_CreateHook(pSetVsy, reinterpret_cast<void*>(&HookedSetVSyncCount),
+                                           reinterpret_cast<void**>(&g_rtOrigSetVsy));
+                        if (sf == MH_ERROR_ALREADY_CREATED) {
+                            MH_RemoveHook(pSetVsy);
+                            sf = MH_CreateHook(pSetVsy, reinterpret_cast<void*>(&HookedSetVSyncCount),
+                                               reinterpret_cast<void**>(&g_rtOrigSetVsy));
+                        }
+                        if (sf == MH_OK) {
+                            g_rtHookTgtSetVsy = pSetVsy;
+                        } else {
+                            // incomplete set: roll back everything so the
+                            // one-shot force never uses a half-installed set
+                            MH_DisableHook(pSetTfr); MH_RemoveHook(pSetTfr);
+                            g_rtHookTgtSetTfr = nullptr; g_rtOrigSetTfr = nullptr;
+                            MH_DisableHook(pLoop); MH_RemoveHook(pLoop);
+                            g_rtHookTgtLoop = nullptr; g_rtOrigLoop = nullptr;
+                            MH_DisableHook(pGetFPS); MH_RemoveHook(pGetFPS);
+                            g_rtHookTgtGetFPS = nullptr; g_rtOrigGetFPS = nullptr;
+                        }
+                    } else {
+                        MH_DisableHook(pLoop); MH_RemoveHook(pLoop);
+                        g_rtHookTgtLoop = nullptr; g_rtOrigLoop = nullptr;
+                        MH_DisableHook(pGetFPS); MH_RemoveHook(pGetFPS);
+                        g_rtHookTgtGetFPS = nullptr; g_rtOrigGetFPS = nullptr;
+                    }
+                } else {
+                    MH_DisableHook(pGetFPS); MH_RemoveHook(pGetFPS);
+                    g_rtHookTgtGetFPS = nullptr; g_rtOrigGetFPS = nullptr;
+                }
+            }
+        }
+    }
 
     if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) { RemoveExistingRtHooks(); return false; }
 
@@ -1752,7 +2465,14 @@ static void LoadFileOrUrl(const wchar_t*pathArg,const wchar_t*refererArg)
     }
 
     // webplayer_win.dll loads lazily after DoVerb returns. Poll via timer
-    // until it appears, then install inline hooks.
+    // until it appears, then install inline hooks. If it is already in
+    // memory (reload in the same process — CoFreeUnusedLibrariesEx may not
+    // actually unload it), install right away: the engine re-initializes its
+    // D3D device within milliseconds of the new load starting.
+    if (GetModuleHandleW(L"webplayer_win.dll")) {
+        g_rtHookTried = false;
+        InstallRuntimeHooks();
+    }
     g_hookRetryCnt=0;
     SetTimer(g_hwndMain,TIMER_ID_INSTALL_HOOK,HOOK_RETRY_INTERVAL_MS,nullptr);
     g_gameLoaded=true;
@@ -1909,6 +2629,52 @@ INT_PTR CALLBACK ToolsWarningDlgProc(HWND hDlg,UINT msg,WPARAM wp,LPARAM){
     return FALSE;
 }
 
+// Experimental Features dialog (v1.4). Currently holds the frame-rate
+// override; future experimental toggles will be appended here.
+INT_PTR CALLBACK ExperimentalDlgProc(HWND hDlg,UINT msg,WPARAM wp,LPARAM lp){
+    switch(msg){
+    case WM_INITDIALOG:{
+        SetWindowText(hDlg,LS("EXP_TITLE"));
+        SetDlgItemText(hDlg,IDC_EXP_FPS_GROUP,LS("EXP_FPS_GROUP"));
+        SetDlgItemText(hDlg,IDC_EXP_FPS_LABEL,LS("EXP_FPS_LABEL"));
+        SetDlgItemText(hDlg,IDC_EXP_FPS_ZERO, LS("EXP_FPS_ZERO"));
+        SetDlgItemText(hDlg,IDC_EXP_FPS_HINT, LS("EXP_FPS_HINT"));
+        SetDlgItemText(hDlg,IDC_EXP_FPS_APPLY,LS("EXP_FPS_APPLY_BTN"));
+        SetDlgItemText(hDlg,IDOK,             LS("EXP_CLOSE_BTN"));
+        wchar_t val[16];_snwprintf(val,15,L"%d",g_fpsTarget);val[15]=0;
+        SetDlgItemText(hDlg,IDC_EXP_FPSEDIT,val);
+        wchar_t st[128];
+        if(g_fpsTarget>0)_snwprintf(st,127,LS("EXP_FPS_STATUS_ON"),g_fpsTarget);
+        else wcscpy(st,LS("EXP_FPS_STATUS_OFF"));
+        st[127]=0;
+        SetDlgItemText(hDlg,IDC_EXP_FPS_STATUS,st);
+        return TRUE;}
+    case WM_COMMAND:{
+        WORD id=LOWORD(wp);
+        if(id==IDOK||id==IDCANCEL){EndDialog(hDlg,id);return TRUE;}
+        if(id==IDC_EXP_FPS_APPLY&&HIWORD(wp)==BN_CLICKED){
+            wchar_t val[32]={};
+            GetDlgItemText(hDlg,IDC_EXP_FPSEDIT,val,31);
+            int fps=_wtoi(val);
+            if(fps<0||fps>1000){
+                MessageBox(hDlg,LS("EXP_FPS_BAD_VALUE"),LS("EXP_TITLE"),MB_OK|MB_ICONWARNING);
+                return TRUE;
+            }
+            g_fpsTarget=fps;
+            SettingsSaveFpsTarget();
+            wchar_t st[128];
+            if(g_fpsTarget>0)_snwprintf(st,127,LS("EXP_FPS_STATUS_ON"),g_fpsTarget);
+            else wcscpy(st,LS("EXP_FPS_STATUS_OFF"));
+            st[127]=0;
+            SetDlgItemText(hDlg,IDC_EXP_FPS_STATUS,st);
+            MessageBox(hDlg,LS("EXP_FPS_SAVED"),LS("EXP_TITLE"),MB_OK|MB_ICONINFORMATION);
+            return TRUE;
+        }
+        return FALSE;}
+    }
+    return FALSE;
+}
+
 // ---------------------------------------------------------------------------
 //  Main window procedure
 // ---------------------------------------------------------------------------
@@ -1985,6 +2751,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
         case IDM_FILE_CLOSE:  CloseGame();   break;
         case IDM_FILE_EXIT:   DestroyWindow(hwnd);break;
         case IDM_VIEW_FULLSCREEN:ToggleFullscreen();break;
+        case IDM_CTRL_EXPERIMENTAL:
+            DialogBox(g_hInst,MAKEINTRESOURCE(IDD_EXPERIMENTAL),hwnd,ExperimentalDlgProc);break;
         case IDM_TOOLS_ENABLE:
             if(DialogBox(g_hInst,MAKEINTRESOURCE(IDD_TOOLS_WARNING),hwnd,ToolsWarningDlgProc)==IDOK)
                 EnableTools();
@@ -2075,16 +2843,11 @@ static void RegisterUnityWpProtocol(){
     }
 }
 
-// URL-decode (%XX -> char) in place. Browsers percent-encode '|' as %7C when
-// launching a custom protocol, so the referer separator arrives encoded.
-// Also handles UTF-8: consecutive %XX bytes form a multi-byte UTF-8 sequence
-// that must be converted to a single wchar_t (e.g. %E7%A9%BF -> U+7A7F, a CJK ideograph).
+// URL-decode (%XX -> char) in place, including multi-byte UTF-8 sequences
+// (browsers percent-encode the protocol '|' separator and CJK paths).
 static void UrlDecodeInPlace(wchar_t* s){
     if(!s)return;
-    // Phase 1: build a UTF-8 byte buffer.
-    //   %XX       -> one raw byte (may be part of a multi-byte sequence)
-    //   ASCII ch  -> one byte
-    //   other ch  -> UTF-8 encoding (up to 3 bytes per wchar_t)
+    // Phase 1: build a UTF-8 byte buffer (%XX, ASCII, or encoded wchar_t).
     int maxOut=(int)wcslen(s);  // decoded output is never longer than input
     char buf[2048];
     int blen=0;
@@ -2102,16 +2865,13 @@ static void UrlDecodeInPlace(wchar_t* s){
         }
         r++;
     }
-    // Phase 2: UTF-8 bytes -> wchar_t in place (output ≤ input length).
+    // Phase 2: UTF-8 bytes -> wchar_t in place.
     int wlen=MultiByteToWideChar(CP_UTF8,0,buf,blen,s,maxOut);
     s[wlen]=L'\0';
 }
 
-// Parse a command-line argument into game URL/path + optional referer.
-// Supports:  unitywp://URL            -> URL (referer empty)
-//            unitywp://URL|referer    -> URL + referer
-//            plain URL or local path  -> as-is (referer empty)
-// The '|' separator may arrive percent-encoded as %7C (browsers do this).
+// Parse a command-line argument: unitywp://URL[|referer], plain URL, or path.
+// The '|' separator may arrive percent-encoded as %7C.
 static void ParseCmdArg(const wchar_t* arg,wchar_t* outGame,size_t gameCap,wchar_t* outRef,size_t refCap){
     outGame[0]=L'\0';if(outRef)outRef[0]=L'\0';
     if(!arg||!arg[0])return;
@@ -2170,10 +2930,8 @@ int WINAPI wWinMain(HINSTANCE hInst,HINSTANCE,LPWSTR,int nShow){
         SetStatus(LS("STATUS_IDLE"));
     }
 
-    // Single-instance lock: different instances loading different Unity
-    // versions would clobber the shared runtime switch. Instead of nagging,
-    // silently bring the existing window to the foreground and forward the
-    // command line so the existing instance loads the requested game.
+    // Single-instance: forward the command line to the existing window instead
+    // of launching a second runtime.
     g_hSingleInstance = CreateMutexW(nullptr, TRUE, L"Global\\UFunPlayerSingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         HWND existing = FindWindowW(L"UFunPlayerWnd", nullptr);

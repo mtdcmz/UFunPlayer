@@ -104,3 +104,17 @@ MSG_LAUNCH_TOOL_BODY=Failed to launch:\n%s
 MSG_CLEARDATA_TITLE=Clear User Data
 MSG_CLEARDATA_CONFIRM=This clears your recent-file history and resets the Tools warning prompt (Tools will need to be re-enabled).\n\nContinue?
 MSG_CLEARDATA_DONE=User data has been cleared.
+
+# --- Experimental Features (v1.4) --------------------------------------------
+MENU_CTRL_EXPERIMENTAL=Experimental &Features...
+EXP_TITLE=Experimental Features
+EXP_FPS_GROUP=Frame Rate Override
+EXP_FPS_LABEL=Target FPS:
+EXP_FPS_ZERO=(0 = disabled)
+EXP_FPS_STATUS_ON=Current setting: %d FPS
+EXP_FPS_STATUS_OFF=Current setting: disabled (game default)
+EXP_FPS_HINT=Forces the player to run at the given frame rate, ignoring the game's own frame limiter and V-Sync setting. V-Sync stays disabled while this is active, so mild screen tearing may occur. Targets above your monitor's refresh rate are capped by it. Set 0 to disable. Changes usually apply immediately; if a game keeps its old frame rate, reload the game.
+EXP_FPS_APPLY_BTN=&Apply
+EXP_CLOSE_BTN=Close
+EXP_FPS_BAD_VALUE=Enter a value between 0 and 1000.
+EXP_FPS_SAVED=Saved. Changes usually apply immediately; if not, reload the game (File > Reload).

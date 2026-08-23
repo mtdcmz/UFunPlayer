@@ -101,3 +101,17 @@ MSG_LAUNCH_TOOL_BODY=启动失败：\n%s
 MSG_CLEARDATA_TITLE=清除用户数据
 MSG_CLEARDATA_CONFIRM=这将清除您的最近打开记录，并重置“启用工具”警告提示的状态（之后需要重新同意才能启用工具）。\n\n是否继续？
 MSG_CLEARDATA_DONE=用户数据已清除。
+
+# --- 实验性功能 (v1.4) --------------------------------------------------------
+MENU_CTRL_EXPERIMENTAL=实验性功能(&F)...
+EXP_TITLE=实验性功能
+EXP_FPS_GROUP=帧率覆盖
+EXP_FPS_LABEL=目标帧率：
+EXP_FPS_ZERO=（0 = 禁用）
+EXP_FPS_STATUS_ON=当前设置：%d FPS
+EXP_FPS_STATUS_OFF=当前设置：禁用（游戏默认）
+EXP_FPS_HINT=强制播放器以指定帧率运行，无视游戏自身的帧率限制和垂直同步设置。功能生效期间垂直同步保持关闭，可能出现轻微画面撕裂。高于显示器刷新率的目标会受其限制。设为 0 可禁用。修改通常立即生效；若游戏帧率未变化，请重新加载游戏。
+EXP_FPS_APPLY_BTN=应用(&A)
+EXP_CLOSE_BTN=关闭
+EXP_FPS_BAD_VALUE=请输入 0 到 1000 之间的数值。
+EXP_FPS_SAVED=已保存。修改通常立即生效；若未生效，请重新加载游戏（文件 > 重新加载）。
