@@ -108,7 +108,7 @@ unitywp:<gameURL>|<refererURL>
 
 The `|` separator (URL‑encoded as `%7C` by browsers) is decoded by UFunPlayer. The referer part is optional.
 
-A companion browser extension automates this on supported game pages. Source code: `https://github.com/mtdcmz/UFPLoader/`.
+A companion browser extension automates this on supported game pages. Source code: [mtdcmz/UFPLoader](https://github.com/mtdcmz/UFPLoader/).
 
 ## License
 
