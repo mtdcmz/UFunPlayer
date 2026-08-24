@@ -2273,6 +2273,17 @@ static void BuildSpoofedUrl(const wchar_t* path, const wchar_t* referer)
     }
 }
 
+// Create (or re-create after MH_ERROR_ALREADY_CREATED) one inline hook.
+static MH_STATUS CreateRuntimeHook(void* target, void* detour, void** orig)
+{
+    MH_STATUS s = MH_CreateHook(target, detour, orig);
+    if (s == MH_ERROR_ALREADY_CREATED) {
+        MH_RemoveHook(target);
+        s = MH_CreateHook(target, detour, orig);
+    }
+    return s;
+}
+
 // Install runtime inline hooks on get_absoluteURL/get_srcValue, plus the
 // experimental frame-rate override when g_fpsTarget > 0.
 // Idempotent per UnityCreate cycle; g_rtHookTried resets in UnityDestroy.
@@ -2423,65 +2434,39 @@ static bool InstallRuntimeHooks()
         void* pSetTfr = FindIcallImpl(hRt, "UnityEngine.Application::set_targetFrameRate");
         void* pSetVsy = FindIcallImpl(hRt, "UnityEngine.QualitySettings::set_vSyncCount");
 
-        if (pGetFPS && pLoop && pSetTfr && pSetVsy) {
-            MH_STATUS sf = MH_CreateHook(pGetFPS, reinterpret_cast<void*>(&HookedGetPlayerTargetFPS),
-                                         reinterpret_cast<void**>(&g_rtOrigGetFPS));
-            if (sf == MH_ERROR_ALREADY_CREATED) {
-                MH_RemoveHook(pGetFPS);
-                sf = MH_CreateHook(pGetFPS, reinterpret_cast<void*>(&HookedGetPlayerTargetFPS),
-                                   reinterpret_cast<void**>(&g_rtOrigGetFPS));
-            }
-            if (sf == MH_OK) {
+        // Core pair (required): loader pump-rate control. The two icall
+        // wrappers are optional — Unity 2.x runtimes have no
+        // set_vSyncCount (2.6) or even set_targetFrameRate (2.0). Those
+        // builds are paced purely by the loader, so the core pair alone
+        // unlocks them.
+        if (pGetFPS && pLoop) {
+            if (CreateRuntimeHook(pGetFPS, reinterpret_cast<void*>(&HookedGetPlayerTargetFPS),
+                                  reinterpret_cast<void**>(&g_rtOrigGetFPS)) == MH_OK)
                 g_rtHookTgtGetFPS = pGetFPS;
+            if (g_rtHookTgtGetFPS &&
+                CreateRuntimeHook(pLoop, reinterpret_cast<void*>(&HookedUnityWinWebLoop),
+                                  reinterpret_cast<void**>(&g_rtOrigLoop)) == MH_OK)
+                g_rtHookTgtLoop = pLoop;
 
-                sf = MH_CreateHook(pLoop, reinterpret_cast<void*>(&HookedUnityWinWebLoop),
-                                   reinterpret_cast<void**>(&g_rtOrigLoop));
-                if (sf == MH_ERROR_ALREADY_CREATED) {
-                    MH_RemoveHook(pLoop);
-                    sf = MH_CreateHook(pLoop, reinterpret_cast<void*>(&HookedUnityWinWebLoop),
-                                       reinterpret_cast<void**>(&g_rtOrigLoop));
-                }
-                if (sf == MH_OK) {
-                    g_rtHookTgtLoop = pLoop;
-
-                    sf = MH_CreateHook(pSetTfr, reinterpret_cast<void*>(&HookedSetTargetFrameRate),
-                                       reinterpret_cast<void**>(&g_rtOrigSetTfr));
-                    if (sf == MH_ERROR_ALREADY_CREATED) {
-                        MH_RemoveHook(pSetTfr);
-                        sf = MH_CreateHook(pSetTfr, reinterpret_cast<void*>(&HookedSetTargetFrameRate),
-                                           reinterpret_cast<void**>(&g_rtOrigSetTfr));
-                    }
-                    if (sf == MH_OK) {
-                        g_rtHookTgtSetTfr = pSetTfr;
-
-                        sf = MH_CreateHook(pSetVsy, reinterpret_cast<void*>(&HookedSetVSyncCount),
-                                           reinterpret_cast<void**>(&g_rtOrigSetVsy));
-                        if (sf == MH_ERROR_ALREADY_CREATED) {
-                            MH_RemoveHook(pSetVsy);
-                            sf = MH_CreateHook(pSetVsy, reinterpret_cast<void*>(&HookedSetVSyncCount),
-                                               reinterpret_cast<void**>(&g_rtOrigSetVsy));
-                        }
-                        if (sf == MH_OK) {
-                            g_rtHookTgtSetVsy = pSetVsy;
-                        } else {
-                            // incomplete set: roll back everything so the
-                            // one-shot force never uses a half-installed set
-                            MH_DisableHook(pSetTfr); MH_RemoveHook(pSetTfr);
-                            g_rtHookTgtSetTfr = nullptr; g_rtOrigSetTfr = nullptr;
-                            MH_DisableHook(pLoop); MH_RemoveHook(pLoop);
-                            g_rtHookTgtLoop = nullptr; g_rtOrigLoop = nullptr;
-                            MH_DisableHook(pGetFPS); MH_RemoveHook(pGetFPS);
-                            g_rtHookTgtGetFPS = nullptr; g_rtOrigGetFPS = nullptr;
-                        }
-                    } else {
-                        MH_DisableHook(pLoop); MH_RemoveHook(pLoop);
-                        g_rtHookTgtLoop = nullptr; g_rtOrigLoop = nullptr;
-                        MH_DisableHook(pGetFPS); MH_RemoveHook(pGetFPS);
-                        g_rtHookTgtGetFPS = nullptr; g_rtOrigGetFPS = nullptr;
-                    }
-                } else {
+            if (g_rtHookTgtGetFPS && g_rtHookTgtLoop) {
+                if (pSetTfr &&
+                    CreateRuntimeHook(pSetTfr, reinterpret_cast<void*>(&HookedSetTargetFrameRate),
+                                      reinterpret_cast<void**>(&g_rtOrigSetTfr)) == MH_OK)
+                    g_rtHookTgtSetTfr = pSetTfr;
+                if (pSetVsy &&
+                    CreateRuntimeHook(pSetVsy, reinterpret_cast<void*>(&HookedSetVSyncCount),
+                                      reinterpret_cast<void**>(&g_rtOrigSetVsy)) == MH_OK)
+                    g_rtHookTgtSetVsy = pSetVsy;
+            } else {
+                // half-created core set: roll back so the per-query re-apply
+                // never calls through a missing trampoline
+                if (g_rtHookTgtGetFPS) {
                     MH_DisableHook(pGetFPS); MH_RemoveHook(pGetFPS);
                     g_rtHookTgtGetFPS = nullptr; g_rtOrigGetFPS = nullptr;
+                }
+                if (g_rtHookTgtLoop) {
+                    MH_DisableHook(pLoop); MH_RemoveHook(pLoop);
+                    g_rtHookTgtLoop = nullptr; g_rtOrigLoop = nullptr;
                 }
             }
         }
