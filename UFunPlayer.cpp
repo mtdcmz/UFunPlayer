@@ -37,7 +37,7 @@
 //  Constants
 // ---------------------------------------------------------------------------
 #define APP_NAME       L"UFunPlayer"
-#define APP_VERSION    L"1.4"
+#define APP_VERSION    L"1.4p"
 #define GITHUB_URL     L"https://github.com/mtdcmz/UFunPlayer"
 #define RUNTIME_DL_URL L"https://github.com/mtdcmz/UFunPlayer/releases/latest/download/Runtime.zip"
 
@@ -1775,6 +1775,7 @@ static void InstallOcxUrlResolveHook()
 struct PeRanges {
     BYTE* textStart; BYTE* textEnd;
     BYTE* dataStart; BYTE* dataEnd;  // .rdata + .data combined
+    BYTE* dataOnlyStart; BYTE* dataOnlyEnd;  // .data section alone
 };
 
 static bool GetPeRanges(HMODULE hMod, PeRanges* r)
@@ -1786,6 +1787,7 @@ static bool GetPeRanges(HMODULE hMod, PeRanges* r)
     IMAGE_NT_HEADERS* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
     if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
     r->textStart = r->textEnd = r->dataStart = r->dataEnd = nullptr;
+    r->dataOnlyStart = r->dataOnlyEnd = nullptr;
     IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
     for (int i = 0; i < nt->FileHeader.NumberOfSections; i++) {
         char name[9] = {};
@@ -1797,6 +1799,10 @@ static bool GetPeRanges(HMODULE hMod, PeRanges* r)
             if (!r->dataStart) r->dataStart = base + sec[i].VirtualAddress;
             BYTE* end = base + sec[i].VirtualAddress + sec[i].Misc.VirtualSize;
             if (end > r->dataEnd) r->dataEnd = end;
+            if (strcmp(name, ".data") == 0) {
+                r->dataOnlyStart = base + sec[i].VirtualAddress;
+                r->dataOnlyEnd = end;
+            }
         }
     }
     return r->textStart && r->dataStart;
@@ -1904,20 +1910,91 @@ static int ParseCallTargets(BYTE* funcAddr, int scanLen, DWORD* outTargets, int 
     return count;
 }
 
+// Locate "FF 15 xx" (indirect call through an absolute pointer) in a byte
+// buffer; returns the offset or -1.
+static int FindFF15(const BYTE* p, int len)
+{
+    for (int i = 0; i + 6 <= len; i++) {
+        if (p[i] == 0xFF && p[i + 1] == 0x15) return i;
+    }
+    return -1;
+}
+
 // Trace impl -> std_str_to_mono -> mono_string_new by parsing E8 call opcodes.
-static void* FindMonoStrNewFromImpl(void* implFunc)
+// Fast path (Unity 4.6+/5.x): the first two calls inside the icall are the
+// value getter and the std::string->MonoString helper, both within 20 bytes.
+// Fallback (Unity 4.3-era layout): the icall starts with a thread-check and
+// an error-report branch, so the helper sits far past the 20-byte window.
+// Deep-scan BOTH string getters (get_absoluteURL + get_srcValue), keep only
+// call targets they share, and accept the first common helper whose own
+// first call is a recognizable mono-string entry point:
+//   (a) 55 8B EC 5D E9 rel32 — frame-setup + tail-jump trampoline; the jump
+//       target is the cdecl (const char*, int) entry (exactly the signature
+//       MonoStrNewFn uses);
+//   (b) FF 15 [ptr] within the first 16 bytes where ptr lives in .data — a
+//       thunk calling through a runtime-resolved function pointer; it takes
+//       just (const char*) and the extra cdecl length argument is ignored.
+static void* FindMonoStrNewFromImpl(HMODULE hRt, void* implFunc, void* implOther)
 {
     BYTE* impl = reinterpret_cast<BYTE*>(implFunc);
     DWORD calls[3] = {};
     int n = ParseCallTargets(impl, 20, calls, 3);
-    if (n < 2) return nullptr;
-    // calls[0] = global_getter, calls[1] = std_str_to_mono
-    BYTE* stdStrToMono = reinterpret_cast<BYTE*>(calls[1]);
-    DWORD innerCalls[2] = {};
-    int m = ParseCallTargets(stdStrToMono, 30, innerCalls, 2);
-    if (m < 1) return nullptr;
-    // innerCalls[0] = mono_string_new
-    return reinterpret_cast<void*>(innerCalls[0]);
+    if (n >= 2) {
+        // calls[0] = global_getter, calls[1] = std_str_to_mono
+        BYTE* stdStrToMono = reinterpret_cast<BYTE*>(calls[1]);
+        DWORD innerCalls[2] = {};
+        int m = ParseCallTargets(stdStrToMono, 30, innerCalls, 2);
+        if (m >= 1)
+            return reinterpret_cast<void*>(innerCalls[0]);  // mono_string_new
+        return nullptr;
+    }
+
+    // Fallback for the thread-check-prologue layout.
+    if (!hRt || !implOther) return nullptr;
+    PeRanges r;
+    if (!GetPeRanges(hRt, &r)) return nullptr;
+
+    const int MAXC = 10;
+    DWORD deepA[MAXC]; int na = ParseCallTargets(impl, 128, deepA, MAXC);
+    DWORD deepS[MAXC]; int ns = ParseCallTargets(reinterpret_cast<BYTE*>(implOther), 128, deepS, MAXC);
+
+    for (int i = 0; i < na; i++) {
+        DWORD t = deepA[i];
+        if (!IsTextPtr(t, r)) continue;
+        bool dup = false;
+        for (int j = 0; j < i; j++)
+            if (deepA[j] == t) { dup = true; break; }
+        if (dup) continue;
+        bool common = false;
+        for (int j = 0; j < ns; j++)
+            if (deepS[j] == t) { common = true; break; }
+        if (!common) continue;
+
+        DWORD tin[2] = {};
+        int nt = ParseCallTargets(reinterpret_cast<BYTE*>(t), 40, tin, 2);
+        if (nt < 1) continue;
+        DWORD u = tin[0];
+        if (!IsTextPtr(u, r)) continue;
+        BYTE ub[32] = {};
+        memcpy(ub, reinterpret_cast<void*>(u), sizeof(ub));
+
+        // (a) frame-setup + tail-jump trampoline -> (ptr, len) entry
+        if (ub[0] == 0x55 && ub[1] == 0x8B && ub[2] == 0xEC &&
+            ub[3] == 0x5D && ub[4] == 0xE9) {
+            int rel = *reinterpret_cast<int*>(ub + 5);
+            DWORD v = u + 9 + (DWORD)rel;
+            if (IsTextPtr(v, r)) return reinterpret_cast<void*>(v);
+        }
+        // (b) indirect call through a .data function pointer -> (const char*) thunk
+        int off = FindFF15(ub, 16);
+        if (off >= 0) {
+            DWORD p = *reinterpret_cast<DWORD*>(ub + off + 2);
+            if (r.dataOnlyStart && r.dataOnlyStart <= reinterpret_cast<BYTE*>(p) &&
+                reinterpret_cast<BYTE*>(p) < r.dataOnlyEnd)
+                return reinterpret_cast<void*>(u);
+        }
+    }
+    return nullptr;
 }
 
 // Detour: return spoofed MonoString if set, else call original.
@@ -2199,22 +2276,17 @@ static void BuildSpoofedUrl(const wchar_t* path, const wchar_t* referer)
 // Install runtime inline hooks on get_absoluteURL/get_srcValue, plus the
 // experimental frame-rate override when g_fpsTarget > 0.
 // Idempotent per UnityCreate cycle; g_rtHookTried resets in UnityDestroy.
+// The two feature sets are independent: a failed URL-hook lookup only
+// disables spoofing, never the frame-rate override (and vice versa).
 static bool InstallRuntimeHooks()
 {
-    if (g_rtHookTried) return g_rtHookAbsURL != nullptr;
+    if (g_rtHookTried)
+        return g_rtHookAbsURL != nullptr || g_rtHookTgtGetFPS != nullptr;
 
     HMODULE hRt = GetModuleHandleW(L"webplayer_win.dll");
     if (!hRt) return false;  // not loaded yet — timer retries; don't set tried
     g_rtHookTried = true;
     g_rtLoopCalls = 0;       // engine has not pumped any frame yet
-
-    void* pAbsURL = FindIcallImpl(hRt, "UnityEngine.Application::get_absoluteURL");
-    void* pSrcVal = FindIcallImpl(hRt, "UnityEngine.Application::get_srcValue");
-    if (!pAbsURL || !pSrcVal) return false;
-
-    // Trace impl -> std_str_to_mono -> mono_string_new_len
-    g_rtMonoStrNew = reinterpret_cast<MonoStrNewFn>(FindMonoStrNewFromImpl(pAbsURL));
-    if (!g_rtMonoStrNew) return false;
 
     static bool mhInited = false;
     if (!mhInited) {
@@ -2225,27 +2297,46 @@ static bool InstallRuntimeHooks()
         mhInited = true;
     }
 
-    RemoveExistingRtHooks();
+    // ---- URL spoof hooks (optional) ----
+    bool urlInstalled = false;
+    void* pAbsURL = FindIcallImpl(hRt, "UnityEngine.Application::get_absoluteURL");
+    void* pSrcVal = FindIcallImpl(hRt, "UnityEngine.Application::get_srcValue");
+    if (pAbsURL && pSrcVal) {
+        // Trace impl -> std_str_to_mono -> mono_string_new_len (with a
+        // fallback for the Unity 4.3-era thread-check icall prologue).
+        g_rtMonoStrNew = reinterpret_cast<MonoStrNewFn>(
+            FindMonoStrNewFromImpl(hRt, pAbsURL, pSrcVal));
+        if (g_rtMonoStrNew) {
+            RemoveExistingRtHooks();
 
-    MH_STATUS s1 = MH_CreateHook(pAbsURL, reinterpret_cast<void*>(&HookedGetAbsoluteURL),
-                                 reinterpret_cast<void**>(&g_origAbsURL));
-    if (s1 == MH_ERROR_ALREADY_CREATED) {
-        MH_RemoveHook(pAbsURL);
-        s1 = MH_CreateHook(pAbsURL, reinterpret_cast<void*>(&HookedGetAbsoluteURL),
-                           reinterpret_cast<void**>(&g_origAbsURL));
-    }
-    if (s1 != MH_OK) return false;
-    g_rtHookTgtAbsURL = pAbsURL;
+            MH_STATUS s1 = MH_CreateHook(pAbsURL, reinterpret_cast<void*>(&HookedGetAbsoluteURL),
+                                         reinterpret_cast<void**>(&g_origAbsURL));
+            if (s1 == MH_ERROR_ALREADY_CREATED) {
+                MH_RemoveHook(pAbsURL);
+                s1 = MH_CreateHook(pAbsURL, reinterpret_cast<void*>(&HookedGetAbsoluteURL),
+                                   reinterpret_cast<void**>(&g_origAbsURL));
+            }
+            if (s1 == MH_OK) {
+                g_rtHookTgtAbsURL = pAbsURL;
 
-    MH_STATUS s2 = MH_CreateHook(pSrcVal, reinterpret_cast<void*>(&HookedGetSrcValue),
-                                 reinterpret_cast<void**>(&g_origSrcVal));
-    if (s2 == MH_ERROR_ALREADY_CREATED) {
-        MH_RemoveHook(pSrcVal);
-        s2 = MH_CreateHook(pSrcVal, reinterpret_cast<void*>(&HookedGetSrcValue),
-                           reinterpret_cast<void**>(&g_origSrcVal));
+                MH_STATUS s2 = MH_CreateHook(pSrcVal, reinterpret_cast<void*>(&HookedGetSrcValue),
+                                             reinterpret_cast<void**>(&g_origSrcVal));
+                if (s2 == MH_ERROR_ALREADY_CREATED) {
+                    MH_RemoveHook(pSrcVal);
+                    s2 = MH_CreateHook(pSrcVal, reinterpret_cast<void*>(&HookedGetSrcValue),
+                                       reinterpret_cast<void**>(&g_origSrcVal));
+                }
+                if (s2 == MH_OK) {
+                    g_rtHookTgtSrcVal = pSrcVal;
+                    urlInstalled = true;
+                } else {
+                    // half-created set: roll the URL hooks back and go on
+                    MH_DisableHook(pAbsURL); MH_RemoveHook(pAbsURL);
+                    g_rtHookTgtAbsURL = nullptr; g_origAbsURL = nullptr;
+                }
+            }
+        }
     }
-    if (s2 != MH_OK) { RemoveExistingRtHooks(); return false; }
-    g_rtHookTgtSrcVal = pSrcVal;
 
     // ---- Experimental: frame-rate override (g_fpsTarget from registry) ----
     // Hooks are optional: a missing symbol (very old runtimes) only disables
@@ -2396,10 +2487,17 @@ static bool InstallRuntimeHooks()
         }
     }
 
+    // Nothing installed at all? Report failure (no retry — same as before).
+    if (!urlInstalled && !g_rtHookTgtGetFPS && !g_rtHookTgtD3D9 &&
+        !g_rtHookTgtDxgiF && !g_rtHookTgtDxgiF1)
+        return false;
+
     if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) { RemoveExistingRtHooks(); return false; }
 
-    g_rtHookAbsURL = reinterpret_cast<void*>(g_origAbsURL);
-    g_rtHookSrcVal = reinterpret_cast<void*>(g_origSrcVal);
+    if (urlInstalled) {
+        g_rtHookAbsURL = reinterpret_cast<void*>(g_origAbsURL);
+        g_rtHookSrcVal = reinterpret_cast<void*>(g_origSrcVal);
+    }
     return true;
 }
 
